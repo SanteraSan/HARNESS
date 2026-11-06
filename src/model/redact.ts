@@ -1,11 +1,5 @@
-/** Маркер вместо секрета. Сам по себе не должен снова попадать под шаблон. */
+/** Маркер вместо секрета. Само это значение из списка не маскируется: замена зациклилась бы. */
 export const REDACTED = "[redacted]";
-
-/**
- * Короче этого порога значение из списка не вырезается:
- * иначе короткий кусок окружения сотрёт обычный текст.
- */
-const MIN_SECRET_LENGTH = 8;
 
 /** Перед регулярным выражением текст режется до этого окна. */
 const PATTERN_WINDOW = 2_000;
@@ -75,7 +69,8 @@ function replaceSecrets(text: string, secrets: readonly string[]): string {
 function normalizeSecrets(secrets: readonly string[]): readonly string[] {
   const unique = new Set<string>();
   for (const secret of secrets) {
-    if (secret.length < MIN_SECRET_LENGTH || REDACTED.includes(secret)) {
+    // Пустая строка разрезала бы текст посимвольно. Маркер зациклил бы замену.
+    if (secret.length === 0 || secret === REDACTED) {
       continue;
     }
     unique.add(secret);

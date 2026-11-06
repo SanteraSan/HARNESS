@@ -204,6 +204,32 @@ describe("LiteLLMChatModel", () => {
     );
   });
 
+  it("должен выбросить статус без тела, если секрет из списка короткий", async () => {
+    const shortSecret = "short";
+    await withServer(
+      {
+        status: 401,
+        body: { error: `marker-not-for-exception ${shortSecret}` },
+      },
+      async ({ baseUrl }) => {
+        const model = new LiteLLMChatModel({
+          baseUrl,
+          apiKey,
+          secrets: [shortSecret],
+        });
+        const caught = await capture(() => model.complete(userInput()));
+        expect(caught).toBeInstanceOf(ModelError);
+        if (!(caught instanceof ModelError)) {
+          return;
+        }
+        expect(caught.status).toBe(401);
+        expect(caught.code).toBe("401");
+        expect(caught.message).not.toContain(shortSecret);
+        expect(caught.message).not.toContain("marker-not-for-exception");
+      },
+    );
+  });
+
   it("должен оставить короткую причину и замаскировать шаблон ключа, если секрета из списка нет", async () => {
     await withServer(
       { status: 503, body: { error: "model busy sk-testsecretvalue" } },
