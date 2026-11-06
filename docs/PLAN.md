@@ -16,7 +16,7 @@ todos:
     status: in_progress
   - id: m1-p4
     content: "M1-P4 Журнал run_steps и redact до записи и до следующего хода модели"
-    status: pending
+    status: in_progress
   - id: m1-p5
     content: "M1-P5 OpenAICompatRunner: цикл, потолок шагов, потеря лока"
     status: pending
@@ -583,7 +583,7 @@ P7 и P5 параллельны: API вызывает `enqueue` и чтение,
 
 ### M1-P4. Журнал
 
-- Волна: 1. Зависит от: P0 `done`. Импорт `redact` из P3: если P3 ещё не влит, пакет `blocked`, а не копирует функцию.
+- Волна: 1. Зависит от: P0 `done`. Статус: `in_progress`. Импорт `redact` из P3: функция уже влита, копировать её нельзя.
 - Пути: `src/journal/**`, `test/journal/**`.
 - Сделать: `appendStep` со следующим `step_index` в транзакции (`select max + 1` при блокировке строк этого `run_id`). Выдержки обрезаются до 2000 символов и проходят `redact`. Токены пишутся как есть.
 - Тесты на базе: два шага получают индексы 0 и 1; секрет из списка не встречается в `request_excerpt` и `response_excerpt`; параллельные вставки не ломают уникальность `(run_id, step_index)`.
