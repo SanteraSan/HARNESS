@@ -7,25 +7,25 @@ todos:
     status: done
   - id: m1-p1
     content: "M1-P1 Очередь: enqueue с идемпотентностью и блокировкой диалога, claim SKIP LOCKED, heartbeat, reaper"
-    status: in_progress
+    status: done
   - id: m1-p2
     content: "M1-P2 Реестр инструментов, default-deny, read_file и list_dir в FILE_ROOT"
-    status: in_progress
+    status: done
   - id: m1-p3
     content: "M1-P3 Клиент LiteLLM и правила разбора native tool_calls"
-    status: in_progress
+    status: done
   - id: m1-p4
     content: "M1-P4 Журнал run_steps и redact до записи и до следующего хода модели"
-    status: in_progress
+    status: done
   - id: m1-p5
     content: "M1-P5 OpenAICompatRunner: цикл, потолок шагов, потеря лока"
-    status: pending
+    status: in_progress
   - id: m1-p6
     content: "M1-P6 Процесс воркера: reaper, один claim, heartbeat, финиш"
     status: pending
   - id: m1-p7
     content: "M1-P7 HTTP: health, POST /v1/runs, GET /v1/runs/:id, bearer"
-    status: pending
+    status: in_progress
   - id: m1-p8
     content: "M1-P8 Telegram: long polling, allowlist пользователей, enqueue, ответ по завершению"
     status: pending
@@ -537,7 +537,7 @@ P7 и P5 параллельны: API вызывает `enqueue` и чтение,
 
 ### M1-P1. Очередь
 
-- Волна: 1. Зависит от: P0 `done`. Статус: `in_progress`.
+- Волна: 1. Зависит от: P0 `done`. Статус: `done`.
 - Пути: `src/queue/**`, `test/queue/**`.
 - Сделать: функции из раздела 8 ровно по SQL раздела 9.
 - Тесты на `harness_test`, два реальных соединения там, где сказано:
@@ -558,7 +558,7 @@ P7 и P5 параллельны: API вызывает `enqueue` и чтение,
 
 ### M1-P2. Инструменты
 
-- Волна: 1. Зависит от: P0 `done`. Статус: `in_progress`.
+- Волна: 1. Зависит от: P0 `done`. Статус: `done`.
 - Пути: `src/tools/**`, `test/tools/**`, `test/fixtures/**`.
 - Сделать: реестр, фильтр allowlist с учётом запрета, `read_file`, `list_dir`, тюрьма `FILE_ROOT`.
 - Тесты без базы:
@@ -574,7 +574,7 @@ P7 и P5 параллельны: API вызывает `enqueue` и чтение,
 
 ### M1-P3. Клиент модели
 
-- Волна: 1. Зависит от: P0 `done`. Статус: `in_progress`.
+- Волна: 1. Зависит от: P0 `done`. Статус: `done`.
 - Пути: `src/model/**`, `test/model/**`.
 - Сделать: `LiteLLMChatModel` реализует `ChatModel`. Запрос `POST {base}/chat/completions`, заголовок bearer, `temperature: 0`, `tools` из входа. Разбор ответа в `ModelOutput`: пустой массив, если поля `tool_calls` нет. Тело аргументов оставить строкой, не парсить здесь.
 - Тесты: поднять локальный `http` сервер внутри теста, не LiteLLM. Проверить форму запроса и разбор трёх ответов: текст, один tool call, пустой choices. Ошибка HTTP становится исключением с кодом статуса, без тела, если тело содержит ключ из redact-списка. Для этого клиент прогоняет сообщение об ошибке через `redact`, а сам `redact` в P0 не живёт. Значит функция `redact` создаётся здесь, в `src/model/redact.ts`, и P4 её импортирует. Это единственное осознанное общее место волны 1. Путь `src/model/redact.ts` принадлежит P3. P4 импортирует, не редактирует.
@@ -583,7 +583,7 @@ P7 и P5 параллельны: API вызывает `enqueue` и чтение,
 
 ### M1-P4. Журнал
 
-- Волна: 1. Зависит от: P0 `done`. Статус: `in_progress`. Импорт `redact` из P3: функция уже влита, копировать её нельзя.
+- Волна: 1. Зависит от: P0 `done`. Статус: `done`. Импорт `redact` из P3: функция уже влита, копировать её нельзя.
 - Пути: `src/journal/**`, `test/journal/**`.
 - Сделать: `appendStep` со следующим `step_index` в транзакции (`select max + 1` при блокировке строк этого `run_id`). Выдержки обрезаются до 2000 символов и проходят `redact`. Токены пишутся как есть.
 - Тесты на базе: два шага получают индексы 0 и 1; секрет из списка не встречается в `request_excerpt` и `response_excerpt`; параллельные вставки не ломают уникальность `(run_id, step_index)`.
@@ -592,7 +592,7 @@ P7 и P5 параллельны: API вызывает `enqueue` и чтение,
 
 ### M1-P5. Раннер
 
-- Волна: 2. Зависит от: P2, P3, P4 `done`. Очередь используется через интерфейс, в тестах — фейковый heartbeat и finish.
+- Волна: 2. Зависит от: P2, P3, P4 `done`. Статус: `in_progress`. Очередь используется через интерфейс, в тестах — фейковый heartbeat и finish.
 - Пути: `src/runner/**`, `test/runner/**`.
 - Сделать: `OpenAICompatRunner` по разделу 10. Модель и инструменты приходят снаружи, чтобы тест не поднимал сеть и файлы вне временного корня.
 - Тесты:
@@ -618,7 +618,7 @@ P7 и P5 параллельны: API вызывает `enqueue` и чтение,
 
 ### M1-P7. HTTP
 
-- Волна: 2, параллельно с P5. Зависит от: P1 `done`.
+- Волна: 2, параллельно с P5. Зависит от: P1 `done`. Статус: `in_progress`.
 - Пути: `src/api/**`, `test/api/**`.
 - Сделать: маршруты раздела 12. Чтение шагов — запрос в этом каталоге, без правки `src/journal`.
 - Тесты через Hono `app.request`, база реальная:
