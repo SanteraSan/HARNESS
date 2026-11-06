@@ -24,7 +24,16 @@ describe("redact", () => {
   it("должен оставить текст без секретов и коротких похожих фрагментов", () => {
     const text = "просто ответ 1234:abc sk-";
     expect(redact(text, [])).toBe(text);
-    expect(redact(text, ["short"])).toBe(text);
+  });
+
+  it("должен маскировать короткое значение из списка целиком", () => {
+    expect(redact("код short и ещё short", ["short"])).toBe(`код ${REDACTED} и ещё ${REDACTED}`);
+    expect(redact("a xa", ["a"])).toBe(`${REDACTED} x${REDACTED}`);
+  });
+
+  it("должен не маскировать пустую строку и сам маркер", () => {
+    const text = `видно ${REDACTED} и буквы`;
+    expect(redact(text, ["", REDACTED])).toBe(text);
   });
 
   it("должен вырезать длинный секрет целиком, а не только окно регулярного выражения", () => {
@@ -44,13 +53,15 @@ describe("redact", () => {
 
     expect(secrets).toContain(databaseUrl);
     expect(secrets).toContain("test-api-key");
+    expect(secrets).toContain("short");
     expect(secrets).not.toContain("");
-    expect(secrets).not.toContain("short");
+    expect(secrets).not.toContain(REDACTED);
 
-    const masked = redact(`url ${databaseUrl} key test-api-key`, secrets);
+    const masked = redact(`url ${databaseUrl} key test-api-key tok short`, secrets);
     expect(masked).not.toContain(databaseUrl);
     expect(masked).not.toContain("test-secret-value");
     expect(masked).not.toContain("test-api-key");
+    expect(masked).not.toContain("short");
     expect(masked).toContain(REDACTED);
   });
 });
