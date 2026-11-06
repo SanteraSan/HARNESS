@@ -1,0 +1,58 @@
+---
+description: Безопасность HARNESS по аудиту MOEX, OWASP Node.js и плану продукта
+alwaysApply: true
+---
+
+# Безопасность
+
+Основа: правила ИБ MOEX Insight (проверки пути, секреты, shell, ReDoS, криптостойкие id), [OWASP Node.js Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Nodejs_Security_Cheat_Sheet.html) и [Security Best Practices Node.js](https://nodejs.org/learn/getting-started/security-best-practices). Пункты Electron оттуда не переносятся.
+
+## Секреты и логи
+
+Секрет не хардкодится. В репозитории только `.env.example` с пустыми значениями. `process.env` читает один модуль конфигурации и проверяет его через zod на старте. Ошибка конфигурации завершает процесс до приёма трафика.
+
+В лог и в ответ клиенту не попадают: значения env, тело ответа LiteLLM, `Authorization`, токен бота, `DATABASE_URL`, стек исключения. Клиент видит код статуса и короткую причину. Подробность — в pino с `run_id`.
+
+Сравнение bearer и других секретов — `crypto.timingSafeEqual` по буферам одинаковой длины. Обычное `===` для секрета не использовать.
+
+`redact` маскирует известные секреты процесса и шаблоны `Bearer `, ключей `sk-` и токена Telegram до журнала и до следующего хода модели.
+
+## Идентификаторы и TLS
+
+Id запуска и временные имена — `crypto.randomUUID()` или `crypto.randomBytes`. `Math.random` и `Date.now` для этого не годятся.
+
+`rejectUnauthorized: false` и `NODE_TLS_REJECT_UNAUTHORIZED=0` запрещены. Свой CA, если появится, передаётся явным путём. `insecureHTTPParser` не включать. Инспектор Node (`--inspect`) в обычном запуске не включать.
+
+## Ввод
+
+Тело HTTP — JSON, лимит 32 КиБ. Поле `message` — строка, максимум 8000 символов. Неизвестные поля zod отбрасывает. Повторённые query-параметры не сливать в объект вручную: схема ждёт один тип.
+
+Перед регулярным выражением строка обрезается. Квантификаторы на пользовательском тексте ограничены (`{0,200}`), не голый `*` и `+`.
+
+Ключи `__proto__`, `constructor`, `prototype` не копировать в общий объект. Запрос не мержить в конфиг через рекурсивный assign. Словари без прототипа — `Map` или объект, созданный без прототипа. `Object.hasOwn` для своих ключей.
+
+## Путь
+
+Проверка `startsWith(root)` без разделителя пропускает каталог `root-evil`. Норма такая:
+
+```typescript
+const rootReal = await realpath(root);
+const resolved = path.resolve(rootReal, userPath);
+const real = await realpath(resolved);
+const prefix = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
+if (real !== rootReal && !real.startsWith(prefix)) {
+  throw new Error("path escapes root");
+}
+```
+
+`..`, абсолютный путь снаружи и симлинк наружу — ошибка инструмента, не чтение. Лимит файла M1 — 64 КиБ UTF-8.
+
+## Процесс и сеть
+
+`child_process.exec`, `execSync`, `spawn` со строкой оболочки и `eval` / `new Function` запрещены. В M1 нет легального shell.
+
+Слушать `127.0.0.1`, не `0.0.0.0`. Заголовки ответа: `X-Content-Type-Options: nosniff`. Пакет `helmet` не добавлять: список зависимостей закрыт, нужные заголовки ставятся в Hono.
+
+Таймауты HTTP-сервера задать явно (`requestTimeout`, `headersTimeout`), чтобы медленный клиент не держал сокет. Ошибку сокета слушать, чтобы она не роняла процесс необработанным `error`.
+
+Стек наружу не отдавать. Необработанное исключение логируется, процесс завершается. Продолжать работу после `uncaughtException` нельзя: аренду запуска снимет reaper.

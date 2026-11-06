@@ -1,0 +1,44 @@
+---
+description: Практика Node.js 22 и TypeScript для процессов HARNESS
+alwaysApply: true
+---
+
+# Node.js
+
+Источники: [nodebestpractices](https://github.com/goldbergyoni/nodebestpractices) (async/await, ошибки-наследники `Error`, центральный обработчик, ESLint) и модель угроз Node.js. Версия — Node 22, ESM, `strict` в TypeScript.
+
+## Модули и типы
+
+`import` только ESM. `any` нет: неизвестное — `unknown` и разбор. Импорт типов — `import { type … }`. Публичная функция имеет явный тип результата.
+
+`var` нет. Обязательство промиса либо `await`, либо явная передача в обработчик. Висящий `promise` линтер должен ловить (`@typescript-eslint/no-floating-promises`).
+
+Ошибки — экземпляры `Error` с кодом. Строку и объект не бросать. Ошибка инструмента и отказ политики — ожидаемые: запуск жив, шаг записан. Нарушение инварианта лока и необработанный отказ — падение процесса.
+
+`try/catch` без действия запрещён. Поймал — залогировал и превратил в статус запуска либо пробросил.
+
+## Цикл событий
+
+Долгий ход модели не занимает соединение базы и не крутит синхронный разбор огромной строки. `readFile` и `realpath` — через `fs.promises`, с лимитом размера. `readFileSync` на пути запроса нет.
+
+`EventEmitter` и сокет подписывают на `error`. Поток без слушателя `error` роняет процесс.
+
+На `SIGTERM` и `SIGINT` воркер перестаёт брать новые запуски. Текущий ход не помечается `succeeded` из обработчика сигнала: процесс выходит, просроченная аренда возвращает строку в очередь. HTTP дослушивает уже принятые запросы и закрывается.
+
+## Конфигурация и логи
+
+Один объект настроек после zod. Дальше код читает его, не `process.env`.
+
+Логгер — pino. `console.log` и `debugger` в коде процессов не оставлять. У каждой строки, где известен запуск, есть `run_id`.
+
+## Зависимости
+
+Runtime M1 закрыт планом: `hono`, `grammy`, `postgres`, `zod`, `pino`, `vitest`, `typescript`, `tsx`. ORM, Redis, LangChain, Claude Agent SDK не ставить.
+
+В P0 один раз разрешена dev-цепочка: `eslint`, `typescript-eslint`, `eslint-plugin-security`, `prettier`, `@types/node`. Правило `eslint-plugin-security` на `detect-child-process`, `detect-eval-with-expression`, `detect-non-literal-regexp`, `detect-unsafe-regex` не выключать пачкой.
+
+`package-lock.json` коммитится вместе с `package.json`. Версию пакета не ослаблять до `*` и `latest`.
+
+## Процессы
+
+`api`, `worker` и `telegram` — разные процессы и разные пулы базы. Воркер не импортирует grammY. Telegram не импортирует клиент модели. API не импортирует `ChatModel`.
