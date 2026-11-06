@@ -201,10 +201,27 @@ function runnerContext(options: WorkerLoopOptions, gate: LockGate): RunnerContex
       });
     },
     finish(runId, workerId, outcome) {
+      // I7: лок уже чужой. Очередь не зовём, succeeded отсюда не ставится.
+      if (!gate.held) {
+        return Promise.resolve(false);
+      }
       return options.queue.finish(runId, workerId, outcome);
     },
-    appendStep(step) {
-      return options.journal.appendStep(step);
+    async appendStep(step) {
+      // I7: ноль строк heartbeat — новые шаги не пишем, в том числе после ответа модели.
+      if (!gate.held) {
+        throw new WorkerError("lock_lost", "lock lost");
+      }
+      const alive = await options.queue.heartbeat(
+        step.runId,
+        options.workerId,
+        options.leaseSeconds,
+      );
+      if (!alive || !gate.held) {
+        markLockLost(step.runId, gate);
+        throw new WorkerError("lock_lost", "lock lost");
+      }
+      await options.journal.appendStep(step);
     },
   };
 }
@@ -227,7 +244,7 @@ function pulse(options: WorkerLoopOptions, runId: string, gate: LockGate): void 
 
 /**
  * I7: исключение раннера переводит строку в failed только пока лок наш.
- * Ноль строк heartbeat — лок потерян, успешный статус этот воркер не ставит.
+ * Ноль строк heartbeat — лок потерян: succeeded не ставим и новые шаги не пишем.
  */
 async function failOwnedRun(
   options: WorkerLoopOptions,

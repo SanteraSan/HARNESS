@@ -7,6 +7,7 @@ import type {
   EnqueueInput,
   FinishOutcome,
   ModelOutput,
+  NewRunStep,
   RunQueue,
   Runner,
 } from "../../src/contracts/index.js";
@@ -193,6 +194,42 @@ describe("worker", () => {
 
     expect(finishes).toEqual([]);
     expect(sleeps).toEqual([1000]);
+    const row = await storedRun(created.run.id);
+    expect(row.status).toBe("running");
+    expect(row.locked_by).toBe("intruder");
+    expect(row.final_text).toBeNull();
+  });
+
+  it("должен не писать шаги после нуля строк heartbeat", async () => {
+    const created = await queue.enqueue(enqueueInput("steps-1", { message: "шаги" }));
+    const lateKinds = ["final", "tool_call", "tool_result", "parse_error"] as const;
+    const runner: Runner = {
+      async run(claimed, ctx) {
+        await ctx.appendStep(journalStep(claimed.id, "model_request", "до потери"));
+        await sql`
+          update runs
+          set locked_by = 'intruder'
+          where id = ${claimed.id}
+        `;
+        const alive = await ctx.heartbeat(claimed.id, WORKER_ID, 30);
+        expect(alive).toBe(false);
+        for (const kind of lateKinds) {
+          await expect(
+            ctx.appendStep(journalStep(claimed.id, kind, "после потери")),
+          ).rejects.toMatchObject({ code: "lock_lost" });
+        }
+        const wrote = await ctx.finish(claimed.id, WORKER_ID, succeeded("нельзя"));
+        expect(wrote).toBe(false);
+      },
+    };
+
+    const { options } = withIdle(runner);
+    await runWorker(options);
+
+    const steps = await storedSteps(created.run.id);
+    expect(steps).toEqual([
+      { kind: "model_request", request_excerpt: "до потери", response_excerpt: "до потери" },
+    ]);
     const row = await storedRun(created.run.id);
     expect(row.status).toBe("running");
     expect(row.locked_by).toBe("intruder");
@@ -438,6 +475,19 @@ function enqueueInput(
   return input;
 }
 
+function journalStep(runId: string, kind: NewRunStep["kind"], marker: string): NewRunStep {
+  return {
+    runId,
+    kind,
+    toolName: kind === "tool_call" || kind === "tool_result" ? "list_dir" : null,
+    requestExcerpt: marker,
+    responseExcerpt: marker,
+    promptTokens: null,
+    completionTokens: null,
+    error: null,
+  };
+}
+
 function succeeded(finalText: string): FinishOutcome {
   return {
     status: "succeeded",
@@ -494,6 +544,21 @@ async function waitForLeaseMove(id: string, before: string, timeoutMs: number): 
     stamp = await lockedUntilText(id);
   }
   return stamp !== before;
+}
+
+interface StoredStep {
+  kind: string;
+  request_excerpt: string | null;
+  response_excerpt: string | null;
+}
+
+async function storedSteps(runId: string): Promise<StoredStep[]> {
+  return sql<StoredStep[]>`
+    select kind, request_excerpt, response_excerpt
+    from run_steps
+    where run_id = ${runId}
+    order by step_index asc
+  `;
 }
 
 async function stepCount(runId: string): Promise<number> {
