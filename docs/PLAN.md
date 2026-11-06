@@ -4,16 +4,16 @@ overview: "Канонический план локального HARNESS. Сн�
 todos:
   - id: m1-p0
     content: "M1-P0 Каркас, контракты, миграция 001, пустой resolveModel, закрытый список зависимостей"
-    status: in_progress
+    status: done
   - id: m1-p1
     content: "M1-P1 Очередь: enqueue с идемпотентностью и блокировкой диалога, claim SKIP LOCKED, heartbeat, reaper"
-    status: pending
+    status: in_progress
   - id: m1-p2
     content: "M1-P2 Реестр инструментов, default-deny, read_file и list_dir в FILE_ROOT"
-    status: pending
+    status: in_progress
   - id: m1-p3
     content: "M1-P3 Клиент LiteLLM и правила разбора native tool_calls"
-    status: pending
+    status: in_progress
   - id: m1-p4
     content: "M1-P4 Журнал run_steps и redact до записи и до следующего хода модели"
     status: pending
@@ -528,7 +528,7 @@ P7 и P5 параллельны: API вызывает `enqueue` и чтение,
 
 ### M1-P0. Каркас и контракты
 
-- Волна: 0. Зависит от: ничего. Статус: `in_progress`.
+- Волна: 0. Зависит от: ничего. Статус: `done`.
 - Пути: корень репозитория (`package.json`, `tsconfig.json`, `vitest.config.ts`, `.nvmrc`, `.gitignore`, `.env.example`), `src/contracts/**`, `src/config.ts`, `src/db/client.ts`, `src/routing/resolve.ts`, `migrations/001_init.sql`, `seed/local_agent.sql`, `test/helpers/db.ts`, `test/contracts/**`, `test/routing/resolve.test.ts`.
 - Сделать: проект Node 22 ESM, строгий TypeScript, vitest, скрипты `migrate`, `seed`, `test`, `api`, `worker`, `telegram`. Команды процессов могут указывать на файлы, которые появятся в следующих пакетах: в P0 достаточно, что `migrate` применяет SQL по порядку и повторный запуск ничего не дублирует. Таблица `schema_migrations(version text primary key)`. Клиент базы. `resolveModel` как в разделе 8. Контракты и чистая `interpretModelOutput`. Хелпер тестов падает, если имя базы не кончается на `_test`, и на каждом тесте очищает `run_steps`, `runs`, `agents`, затем заново применяет сид.
 - Тесты: разбор четырёх веток `interpretModelOutput`; запрет побеждает allowlist на чистой функции фильтра имён; `resolveModel` возвращает поля агента; миграция дважды подряд оставляет одну копию таблиц; check принимает `source = cron` и не принимает произвольную строку.
@@ -537,7 +537,7 @@ P7 и P5 параллельны: API вызывает `enqueue` и чтение,
 
 ### M1-P1. Очередь
 
-- Волна: 1. Зависит от: P0 `done`.
+- Волна: 1. Зависит от: P0 `done`. Статус: `in_progress`.
 - Пути: `src/queue/**`, `test/queue/**`.
 - Сделать: функции из раздела 8 ровно по SQL раздела 9.
 - Тесты на `harness_test`, два реальных соединения там, где сказано:
@@ -558,7 +558,7 @@ P7 и P5 параллельны: API вызывает `enqueue` и чтение,
 
 ### M1-P2. Инструменты
 
-- Волна: 1. Зависит от: P0 `done`.
+- Волна: 1. Зависит от: P0 `done`. Статус: `in_progress`.
 - Пути: `src/tools/**`, `test/tools/**`, `test/fixtures/**`.
 - Сделать: реестр, фильтр allowlist с учётом запрета, `read_file`, `list_dir`, тюрьма `FILE_ROOT`.
 - Тесты без базы:
@@ -574,7 +574,7 @@ P7 и P5 параллельны: API вызывает `enqueue` и чтение,
 
 ### M1-P3. Клиент модели
 
-- Волна: 1. Зависит от: P0 `done`.
+- Волна: 1. Зависит от: P0 `done`. Статус: `in_progress`.
 - Пути: `src/model/**`, `test/model/**`.
 - Сделать: `LiteLLMChatModel` реализует `ChatModel`. Запрос `POST {base}/chat/completions`, заголовок bearer, `temperature: 0`, `tools` из входа. Разбор ответа в `ModelOutput`: пустой массив, если поля `tool_calls` нет. Тело аргументов оставить строкой, не парсить здесь.
 - Тесты: поднять локальный `http` сервер внутри теста, не LiteLLM. Проверить форму запроса и разбор трёх ответов: текст, один tool call, пустой choices. Ошибка HTTP становится исключением с кодом статуса, без тела, если тело содержит ключ из redact-списка. Для этого клиент прогоняет сообщение об ошибке через `redact`, а сам `redact` в P0 не живёт. Значит функция `redact` создаётся здесь, в `src/model/redact.ts`, и P4 её импортирует. Это единственное осознанное общее место волны 1. Путь `src/model/redact.ts` принадлежит P3. P4 импортирует, не редактирует.
