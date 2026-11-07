@@ -37,10 +37,10 @@ todos:
     status: done
   - id: m2-p1
     content: "M2-P1 Маршрут: route_rules, resolveModel, cost_usd, внешний алиас на фейковом клиенте"
-    status: in_progress
+    status: done
   - id: m2-p2
     content: "M2-P2 record_note: идемпотентная запись в FILE_ROOT/out"
-    status: pending
+    status: in_progress
   - id: m2-p3
     content: "M2-P3 Делегирование: create_subtask и approve"
     status: pending
@@ -727,7 +727,7 @@ M2-4   P6 после P2, P3, P4, P5
 
 ### M2-P1. Маршрут и внешний алиас
 
-- Волна: M2-0. Зависит от: M1-P10 `done`. Статус: `in_progress`. Это единственный пакет M2, которому можно менять контракт, и только полями ниже.
+- Волна: M2-0. Зависит от: M1-P10 `done`. Статус: `done`. Это единственный пакет M2, которому можно менять контракт, и только полями ниже.
 - Пути: `migrations/002_route.sql`, `src/routing/**`, `src/contracts/**`, `src/runner/**`, `src/model/litellm.ts`, `src/model/index.ts`, `test/routing/**`, `test/runner/**`, `test/model/**`, `seed/route_rules.sql`.
 - Сделать: новая миграция, не правка `001`. Таблица `route_rules(id uuid primary key, tenant_id text not null, agent_id uuid not null references agents(id), kind text not null check (kind in ('write_tool','second_parse_error')), model_alias text not null, provider text not null check (provider = 'external'))`. Колонка `run_steps.cost_usd numeric`. `resolveModel` читает правила. Инструмент с `effect: "write"` и второй `parse_error` за сутки по этому агенту выбирают внешний алиас из правила. Первый ход чтения остаётся локальным. На запуске и в шаге видно, какой алиас ответил. Для `provider = local` в шаг пишется `cost_usd = 0`. Для внешнего берётся число из ответа LiteLLM, если поле есть, иначе `null`, и шаг всё равно пишется. Алиас в сиде правила — `coder-cloud`: это имя уже намечено в конфиге стека и в HARNESS только строка правила. Второй HTTP-клиент не пишется. Репозиторий стека не менять.
 - Тесты на фейковом клиенте, без живого OpenRouter: ход чтения остаётся `agent` / `local` и пишет `cost_usd = 0`; вызов инструмента `effect: "write"` выбирает `coder-cloud` / `external`; второй `parse_error` за сутки по агенту на следующем запуске того же хода выбирает внешний алиас; первый `parse_error` остаётся локальным; ответ без поля стоимости пишет шаг с `cost_usd is null`.
@@ -736,7 +736,7 @@ M2-4   P6 после P2, P3, P4, P5
 
 ### M2-P2. Учебная запись
 
-- Волна: M2-1. Зависит от: M2-P1 `done`. Статус: `pending`.
+- Волна: M2-1. Зависит от: M2-P1 `done`. Статус: `in_progress`.
 - Пути: `src/tools/record-note.ts`, регистрация в `src/tools/registry.ts` и `src/tools/index.ts`, `test/tools/record-note.test.ts`.
 - Сделать: инструмент `record_note`, `effect: "write"`. Пишет файл в `FILE_ROOT/out` с ключом идемпотентности вызова. Повтор того же ключа возвращает первый результат и не создаёт второй файл. Ключей магазинов нет.
 - Тесты: два вызова с одним ключом — один файл и тот же результат; другой ключ — второй файл; путь вне `FILE_ROOT/out` — ошибка инструмента.
