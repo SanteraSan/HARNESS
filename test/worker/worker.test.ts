@@ -25,7 +25,7 @@ import { sql } from "../helpers/db.js";
 const AGENT_ID = "00000000-0000-4000-8000-000000000001";
 const WORKER_ID = "worker-p6";
 const SEEDED_PROMPT =
-  "Отвечай по результатам инструментов. Не выдумывай содержимое файлов. Инструменты только из списка: read_file и list_dir.";
+  "Отвечай по результатам инструментов. Не выдумывай содержимое файлов. Инструменты только из списка: read_file и list_dir. Окончательный ответ пиши обычным текстом, без предисловия, без обратных кавычек и без блоков кода.";
 
 const queue = createRunQueue(sql);
 const journal = createRunJournal(sql, ["test-secret-value"]);
