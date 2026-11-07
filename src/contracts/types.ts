@@ -25,8 +25,8 @@ export type ToolEffect = (typeof TOOL_EFFECTS)[number];
 export const SOURCES = ["api", "telegram", "cron", "delegation"] as const;
 export type Source = (typeof SOURCES)[number];
 
-/** Источник постановки в M1. cron и delegation колонка хранит, очередь их не создаёт. */
-export type EnqueueSource = "api" | "telegram";
+/** Источник постановки. Очередь пишет все четыре значения в колонку source. */
+export type EnqueueSource = "api" | "telegram" | "cron" | "delegation";
 
 export interface AgentRecord {
   id: string;
@@ -198,6 +198,8 @@ export interface EnqueueInput {
   message: string;
   chatId: bigint | null;
   priority?: number;
+  /** Родитель дочернего запуска. Нет поля — в parent_run_id пишется null. */
+  parentRunId?: string;
 }
 
 export interface EnqueueResult {

@@ -53,6 +53,7 @@ export function createRunQueue(sql: Sql): RunQueue {
  */
 async function enqueueRun(sql: Sql, input: EnqueueInput): Promise<EnqueueResult> {
   const chatId = input.chatId;
+  const parentRunId = parentRunIdForInsert(input.parentRunId);
   return sql.begin(async (tx) => {
     const existing = await tx<Record<string, unknown>[]>`
       select *
@@ -88,6 +89,7 @@ async function enqueueRun(sql: Sql, input: EnqueueInput): Promise<EnqueueResult>
       insert into runs (
         tenant_id,
         agent_id,
+        parent_run_id,
         source,
         status,
         priority,
@@ -98,6 +100,7 @@ async function enqueueRun(sql: Sql, input: EnqueueInput): Promise<EnqueueResult>
       ) values (
         ${input.tenantId},
         ${input.agentId},
+        ${parentRunId},
         ${input.source},
         'queued',
         ${priority},
@@ -228,6 +231,43 @@ function priorityForInsert(value: number | undefined): number {
     throw new QueueError("invalid_priority", "priority is invalid");
   }
   return priority;
+}
+
+/**
+ * Необязательный родитель пишется в уже существующую колонку.
+ * Захват этот идентификатор не разбирает и отдельный процесс под него не стартует.
+ */
+function parentRunIdForInsert(value: string | undefined): string | null {
+  if (value === undefined) {
+    return null;
+  }
+  if (typeof value !== "string" || !isUuid(value)) {
+    throw new QueueError("invalid_parent_run", "parent run id is invalid");
+  }
+  return value;
+}
+
+function isUuid(value: string): boolean {
+  if (value.length !== 36) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    const hyphenAt = index === 8 || index === 13 || index === 18 || index === 23;
+    if (hyphenAt) {
+      if (code !== 45) {
+        return false;
+      }
+      continue;
+    }
+    const digit = code >= 48 && code <= 57;
+    const lower = code >= 97 && code <= 102;
+    const upper = code >= 65 && code <= 70;
+    if (!digit && !lower && !upper) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function assertFinishOutcome(outcome: FinishOutcome): void {

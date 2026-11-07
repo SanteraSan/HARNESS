@@ -38,7 +38,11 @@ describe("migration 001", () => {
     const versions = await sql<{ version: string }[]>`
       select version from schema_migrations order by version
     `;
-    expect(versions.map((row) => row.version)).toEqual(["001_init.sql", "002_route.sql"]);
+    expect(versions.map((row) => row.version)).toEqual([
+      "001_init.sql",
+      "002_route.sql",
+      "003_tasks.sql",
+    ]);
 
     const agents = await sql<{ count: number }[]>`select count(*)::int as count from agents`;
     expect(agents[0]?.count).toBe(1);
