@@ -20,6 +20,7 @@ import { LiteLLMChatModel, collectSecrets } from "./model/index.js";
 import { createRunQueue } from "./queue/index.js";
 import { ClaudeSdkRunner, unavailableClaudeSdkClient } from "./runner/claude-sdk.js";
 import { OpenAICompatRunner, type RunnerAgent } from "./runner/index.js";
+import { type ChatModelAlias } from "./runner/openai-compat.js";
 import { resolveModel } from "./routing/resolve.js";
 import { toolRegistry } from "./tools/index.js";
 
@@ -191,13 +192,18 @@ async function runClaimed(options: WorkerLoopOptions, claimed: ClaimedRun): Prom
   timer.unref();
   gate.timer = timer;
 
+  let runner: Runner | undefined;
   try {
-    const runner = await selectRunner(options, claimed);
+    runner = await selectRunner(options, claimed);
+    await passChatModelAlias(options, runner, claimed);
     await runner.run(claimed, runnerContext(options, gate));
   } catch (error: unknown) {
     logger.error({ run_id: claimed.id, err: error }, "runner failed");
     await failOwnedRun(options, claimed.id, gate);
   } finally {
+    if (runner instanceof OpenAICompatRunner) {
+      runner.assignChatModelAlias(null);
+    }
     gate.active = false;
     if (gate.timer !== undefined) {
       clearInterval(gate.timer);
@@ -211,6 +217,7 @@ async function runClaimed(options: WorkerLoopOptions, claimed: ClaimedRun): Prom
  * На захвате эффектов инструментов ещё нет, поэтому смена алиаса внутри хода
  * остаётся в OpenAICompatRunner. Второй захват отсюда не делается.
  * local не вызывает createExternal: SDK-раннер для него не создаётся.
+ * Выбор чата в этот выбор не входит: он не меняет provider захвата.
  */
 async function selectRunner(options: WorkerLoopOptions, claimed: ClaimedRun): Promise<Runner> {
   const selection = options.selection;
@@ -237,6 +244,58 @@ async function selectRunner(options: WorkerLoopOptions, claimed: ClaimedRun): Pr
     return selection.local;
   }
   return selection.createExternal();
+}
+
+/**
+ * Воркер читает выбор и передаёт алиас в уже выбранный OpenAI-совместимый раннер.
+ * API, cron и delegation до запроса не доходят. Выбор не создаёт ClaudeSdkRunner:
+ * selectRunner уже взял реализацию по provider, а чат этот provider не меняет.
+ */
+async function passChatModelAlias(
+  options: WorkerLoopOptions,
+  runner: Runner,
+  claimed: ClaimedRun,
+): Promise<void> {
+  const selection = options.selection;
+  if (selection === undefined || !(runner instanceof OpenAICompatRunner)) {
+    return;
+  }
+  const alias = await readTelegramChatModelAlias(selection.sql, claimed);
+  runner.assignChatModelAlias(alias);
+}
+
+/**
+ * Строка chat_model_choices читается только для source = telegram.
+ * Нет строки — null, ход остаётся на алиасе агента.
+ */
+async function readTelegramChatModelAlias(
+  sql: Sql,
+  claimed: ClaimedRun,
+): Promise<ChatModelAlias | null> {
+  if (claimed.source !== "telegram" || claimed.chatId === null) {
+    return null;
+  }
+  const chatId = claimed.chatId.toString();
+  const rows = await sql<{ model_alias: string }[]>`
+    select model_alias
+    from chat_model_choices
+    where tenant_id = ${claimed.tenantId}
+      and chat_id = ${sql.types.chat_id(chatId)}
+  `;
+  if (rows.length === 0) {
+    return null;
+  }
+  if (rows.length !== 1) {
+    throw new WorkerError("invalid_chat_model", "chat model choice is ambiguous");
+  }
+  return requireChatModelAlias(rows[0]?.model_alias);
+}
+
+function requireChatModelAlias(value: unknown): ChatModelAlias {
+  if (value === "agent" || value === "coder-cloud") {
+    return value;
+  }
+  throw new WorkerError("invalid_chat_model", "chat model alias is invalid");
 }
 
 function runnerContext(options: WorkerLoopOptions, gate: LockGate): RunnerContext {
@@ -433,6 +492,22 @@ function requireStringArray(value: unknown): string[] {
   return names;
 }
 
+/** Ход через LiteLLM в процессе воркера. Не из окружения: у класса по умолчанию 60 секунд. */
+export const WORKER_MODEL_TIMEOUT_MS = 180_000;
+
+export function createWorkerChatModel(options: {
+  baseUrl: string;
+  apiKey: string;
+  secrets: readonly string[];
+}): LiteLLMChatModel {
+  return new LiteLLMChatModel({
+    baseUrl: options.baseUrl,
+    apiKey: options.apiKey,
+    secrets: options.secrets,
+    timeoutMs: WORKER_MODEL_TIMEOUT_MS,
+  });
+}
+
 function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): WorkerLoopOptions {
   const secrets = collectSecrets({
     databaseUrl: config.databaseUrl,
@@ -458,7 +533,7 @@ function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): Worke
   return {
     queue,
     journal: createRunJournal(sql, secrets),
-    model: new LiteLLMChatModel({
+    model: createWorkerChatModel({
       baseUrl: config.litellmBaseUrl,
       apiKey: config.litellmApiKey,
       secrets,

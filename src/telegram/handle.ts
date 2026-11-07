@@ -6,6 +6,7 @@ import {
   decideUpdate,
   replyForBuffered,
   replyForEnqueue,
+  type ChatModelAlias,
   type TelegramUpdateView,
 } from "./decide.js";
 
@@ -31,8 +32,9 @@ export interface HandleResult {
 }
 
 /**
- * Ветка решает отказ, просьбу прислать текст или параметры enqueue.
+ * Ветка решает отказ, просьбу прислать текст, выбор модели или параметры enqueue.
  * Очередь вызывается в ветке enqueue. Модель отсюда не вызывается.
+ * /local и /cloud отвечают текстом процесса и запуск не создают.
  * rememberBusy есть только у бота. Без него фраза прежняя: живой запуск и то, что новый не создан.
  * HTTP в этот модуль не заходит и по-прежнему получает 409 dialog_busy.
  */
@@ -45,6 +47,7 @@ export async function handleTelegramUpdate(
     rememberBusy?: (message: DialogMessage) => Promise<void>;
     hasPendingBuffer?: (agentId: string, chatId: bigint) => Promise<boolean>;
     findExistingRun?: (agentId: string, idempotencyKey: string) => Promise<string | null>;
+    saveChatModel?: (chatId: bigint, modelAlias: ChatModelAlias) => Promise<void>;
   },
 ): Promise<HandleResult> {
   const decision = decideUpdate(update, options.allowedUserIds, options.agentId);
@@ -52,6 +55,13 @@ export async function handleTelegramUpdate(
     return { text: null, followRunId: null, chatId: null, wakeBuffer: false };
   }
   if (decision.kind === "deny" || decision.kind === "need_text") {
+    return { text: decision.text, followRunId: null, chatId: null, wakeBuffer: false };
+  }
+  if (decision.kind === "choose_model") {
+    const save = options.saveChatModel;
+    if (save !== undefined) {
+      await save(decision.chatId, decision.modelAlias);
+    }
     return { text: decision.text, followRunId: null, chatId: null, wakeBuffer: false };
   }
 

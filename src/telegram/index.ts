@@ -8,6 +8,7 @@ import {
   releaseReadyDialogs,
   saveDialogMessage,
 } from "./buffer.js";
+import { saveChatModelChoice } from "./chat-model.js";
 import { createTelegramBot, type FollowBridge } from "./bot.js";
 import { parseDecimalChatId } from "./chat-id.js";
 import { POLL_INTERVAL_MS } from "./decide.js";
@@ -98,6 +99,7 @@ async function serve(
     prepareDelivery: (run) => prepareRunDelivery(sql, run),
     releaseBuffered: (chatId) => releaseChat(sql, enqueueTelegram, agentId, chatId),
     followBridge,
+    saveChatModel: (chatId, modelAlias) => saveChatModelChoice(sql, chatId, modelAlias),
   });
   track(pumpBufferedDialogs(sql, enqueueTelegram, agentId, followBridge, abort.signal));
 

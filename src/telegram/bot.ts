@@ -7,6 +7,7 @@ import {
   INVALID_UPDATE_TEXT,
   partsFromMessage,
   viewFromParts,
+  type ChatModelAlias,
   type RunSnapshot,
 } from "./decide.js";
 import { followRun, type DeliveryMemory, type FollowDeps } from "./follow.js";
@@ -39,6 +40,7 @@ export interface TelegramBotOptions {
   prepareDelivery?: FollowDeps["prepareDelivery"];
   releaseBuffered?: (chatId: string) => Promise<string | null>;
   followBridge?: FollowBridge;
+  saveChatModel?: (chatId: bigint, modelAlias: ChatModelAlias) => Promise<void>;
 }
 
 /** grammY только переводит апдейт в чистую функцию и отправляет уже готовый текст. */
@@ -114,6 +116,7 @@ async function onMessage(
       rememberBusy: options.rememberBusy,
       hasPendingBuffer: options.hasPendingBuffer,
       findExistingRun: options.findExistingRun,
+      saveChatModel: options.saveChatModel,
     });
   } catch (error) {
     logger.error({ err: error }, "telegram enqueue failed");

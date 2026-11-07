@@ -27,6 +27,9 @@ const ARGUMENT_PARSE_LIMIT = 32 * 1024;
 
 const EXCEPTION_TEXT_LIMIT = 500;
 
+/** Алиас выбора чата. Воркер читает строку и передаёт её сюда. Таблицу раннер не читает. */
+export type ChatModelAlias = "agent" | "coder-cloud";
+
 /** Поля агента, без которых не собрать промпт, потолок шагов и список инструментов. */
 export interface RunnerAgent {
   id: string;
@@ -78,6 +81,8 @@ export class OpenAICompatRunner implements Runner {
   private readonly fileRoot: string;
   private readonly secrets: readonly string[];
   private readonly sql: Sql | undefined;
+  /** Алиас текущего захвата. null — выбора нет, остаётся resolveModel. */
+  private chatModelAlias: ChatModelAlias | null = null;
 
   constructor(options: OpenAICompatRunnerOptions) {
     if (options.fileRoot.trim().length === 0) {
@@ -89,7 +94,17 @@ export class OpenAICompatRunner implements Runner {
     this.sql = options.sql;
   }
 
+  /**
+   * Воркер передаёт алиас, прочитанный из chat_model_choices.
+   * null — выбора нет или источник не Telegram.
+   */
+  assignChatModelAlias(alias: ChatModelAlias | null): void {
+    this.chatModelAlias = alias;
+  }
+
   async run(claimed: ClaimedRun, ctx: RunnerContext): Promise<void> {
+    const chatAlias = this.chatModelAlias;
+    this.chatModelAlias = null;
     const agent = await this.requireAgent(claimed.agentId);
     const allowlist = [...agent.toolAllowlist];
     const tools = modelToolsForAllowlist(allowlist, ctx.tools);
@@ -114,7 +129,7 @@ export class OpenAICompatRunner implements Runner {
         return;
       }
 
-      resolved = await this.resolveAlias(agent, claimed.tenantId, seenEffects);
+      resolved = await this.resolveAlias(agent, claimed.tenantId, seenEffects, chatAlias);
       let cost = costFor(resolved.provider, null);
       const requestStep = await this.writeStep(
         ctx,
@@ -196,6 +211,25 @@ export class OpenAICompatRunner implements Runner {
   }
 
   private async resolveAlias(
+    agent: RunnerAgent,
+    tenantId: string,
+    toolEffects: readonly ToolEffect[],
+    chatAlias: ChatModelAlias | null,
+  ): Promise<ResolvedAlias> {
+    const resolved = await this.resolveAgentAlias(agent, tenantId, toolEffects);
+    // Выбор чата подменяет только алиас агента и не ставит provider external.
+    // Правило маршрута, уже ушедшее с алиаса агента, остаётся: SDK из-за чата не открывается.
+    if (
+      chatAlias !== null &&
+      resolved.modelAlias === agent.modelAlias &&
+      resolved.provider === agent.provider
+    ) {
+      return { modelAlias: chatAlias, provider: agent.provider };
+    }
+    return resolved;
+  }
+
+  private async resolveAgentAlias(
     agent: RunnerAgent,
     tenantId: string,
     toolEffects: readonly ToolEffect[],
@@ -310,14 +344,7 @@ export class OpenAICompatRunner implements Runner {
         continue;
       }
 
-      const visible = await this.executeAllowed(
-        ctx,
-        runId,
-        decision.tool,
-        call,
-        toolContext,
-        cost,
-      );
+      const visible = await this.executeAllowed(ctx, runId, decision.tool, call, toolContext, cost);
       messages.push(toolMessage(call.id, visible));
     }
   }

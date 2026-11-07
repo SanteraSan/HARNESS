@@ -13,6 +13,13 @@ const DENY_TEXT = "Нет доступа.";
 const NEED_TEXT = "В этом срезе принимается только текст.";
 export const INVALID_UPDATE_TEXT = "Сообщение не принято.";
 const TOO_LONG_TEXT = "Сообщение длиннее 8000 символов.";
+const LOCAL_COMMAND = "/local";
+const CLOUD_COMMAND = "/cloud";
+const LOCAL_MODEL_TEXT = "Этот чат спрашивает локальную модель.";
+const CLOUD_MODEL_TEXT = "Этот чат спрашивает внешнюю модель.";
+
+/** Алиас выбора чата. Это строка алиаса хода, не провайдер SDK. */
+export type ChatModelAlias = "agent" | "coder-cloud";
 const CANCELLED_TEXT = "Запуск отменён.";
 const EMPTY_FINAL_TEXT = "Готово.";
 const FAILED_PREFIX = "Запуск не выполнен. ";
@@ -29,6 +36,12 @@ export type UpdateDecision =
   | { kind: "ignore" }
   | { kind: "deny"; text: string }
   | { kind: "need_text"; text: string }
+  | {
+      kind: "choose_model";
+      modelAlias: ChatModelAlias;
+      chatId: bigint;
+      text: string;
+    }
   | {
       kind: "enqueue";
       idempotencyKey: string;
@@ -70,6 +83,7 @@ export function viewFromParts(parts: IncomingParts): TelegramUpdateView | null {
 /**
  * Решает, ставить ли запуск. Сеть и очередь здесь не вызываются.
  * Ключ идемпотентности: tg:{agentId}:{updateId}.
+ * Отдельное сообщение /local или /cloud запуск не ставит: это выбор алиаса чата.
  */
 export function decideUpdate(
   update: TelegramUpdateView,
@@ -95,12 +109,33 @@ export function decideUpdate(
     return { kind: "need_text", text: TOO_LONG_TEXT };
   }
 
+  const choice = chatModelCommand(update.content.message);
+  if (choice !== null) {
+    return {
+      kind: "choose_model",
+      modelAlias: choice.modelAlias,
+      chatId,
+      text: choice.text,
+    };
+  }
+
   return {
     kind: "enqueue",
     idempotencyKey: `tg:${agentId}:${updateId}`,
     message: update.content.message,
     chatId,
   };
+}
+
+/** Точное сообщение команды. Текст с аргументом остаётся обычным запуском. */
+function chatModelCommand(message: string): { modelAlias: ChatModelAlias; text: string } | null {
+  if (message === LOCAL_COMMAND) {
+    return { modelAlias: "agent", text: LOCAL_MODEL_TEXT };
+  }
+  if (message === CLOUD_COMMAND) {
+    return { modelAlias: "coder-cloud", text: CLOUD_MODEL_TEXT };
+  }
+  return null;
 }
 
 export function replyForEnqueue(result: {
