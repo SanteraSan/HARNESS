@@ -1,5 +1,6 @@
 export { listDirTool } from "./list-dir.js";
 export { readFileTool } from "./read-file.js";
+export { recordNoteTool } from "./record-note.js";
 export {
   decideToolCall,
   modelToolsForAllowlist,

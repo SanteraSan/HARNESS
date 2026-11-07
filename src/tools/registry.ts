@@ -4,8 +4,9 @@ import { filterToolNames, isDeniedToolName } from "../contracts/tool-policy.js";
 import type { ModelToolSpec, Tool } from "../contracts/types.js";
 import { listDirTool } from "./list-dir.js";
 import { readFileTool } from "./read-file.js";
+import { recordNoteTool } from "./record-note.js";
 
-export const toolRegistry: readonly Tool[] = [readFileTool, listDirTool];
+export const toolRegistry: readonly Tool[] = [readFileTool, listDirTool, recordNoteTool];
 
 export type ToolDecision = { ok: true; tool: Tool } | { ok: false; error: string };
 
@@ -48,7 +49,7 @@ export function modelToolsForAllowlist(
   return specs;
 }
 
-/** Неизвестное, запрещённое и write-имя отклоняется здесь. execute эта функция не вызывает. */
+/** Неизвестное и запрещённое имя отклоняется здесь. execute эта функция не вызывает. */
 export function decideToolCall(
   name: string,
   allowlist: readonly string[],
@@ -70,11 +71,15 @@ function findCallable(name: string, registry: readonly Tool[]): Tool | undefined
     return undefined;
   }
   for (const tool of registry) {
-    if (tool.name === name && tool.effect === "read" && !isDeniedToolName(tool.name)) {
+    if (tool.name === name && isCallableEffect(tool.effect) && !isDeniedToolName(tool.name)) {
       return tool;
     }
   }
   return undefined;
+}
+
+function isCallableEffect(effect: Tool["effect"]): boolean {
+  return effect === "read" || effect === "write";
 }
 
 function toolParameters(schema: ZodType): Record<string, unknown> {
