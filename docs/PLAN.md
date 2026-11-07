@@ -70,7 +70,7 @@ todos:
     status: done
   - id: m3-p6
     content: "M3-P6 Выбор локальной или внешней модели в чате Telegram"
-    status: in_progress
+    status: done
 isProject: false
 ---
 
@@ -831,7 +831,7 @@ M2-4   P6 после P2, P3, P4, P5
 
 ### M3-P6. Выбор модели в чате
 
-- Волна: M3-3. Зависит от: M3-P1 и M3-P5 `done`. Статус: `in_progress`.
+- Волна: M3-3. Зависит от: M3-P1 и M3-P5 `done`. Статус: `done`.
 - Пути: `migrations/007_chat_model.sql`, `src/telegram/**`, `src/worker.ts`, `src/runner/openai-compat.ts`, `test/telegram/**`, `test/runner/**`.
 - Сделать: пользователь из allowlist пишет отдельным сообщением `/local` или `/cloud`. Команда не создаёт запуск и не вызывает модель. Процесс Telegram отвечает сам: на `/local` — «Этот чат спрашивает локальную модель.», на `/cloud` — «Этот чат спрашивает внешнюю модель.» Выбор хранится по `(tenant_id, chat_id)` и повтор команды обновляет ту же строку. Пока выбора нет, обычный текст идёт в алиас агента `agent`. После `/local` ход модели получает алиас `agent`, после `/cloud` — `coder-cloud`. Оба хода выполняет уже существующий OpenAI-совместимый раннер. `provider` захвата остаётся `local`: выбор чата не создаёт ClaudeSdkRunner. Внешний ответ — это алиас LiteLLM, не SDK. API, cron и delegation таблицу выбора не читают. Инструменты allowlist агента остаются при обоих выборах. Таймаут клиента LiteLLM в процессе воркера — 180 секунд. Живой вызов Gemini, OpenRouter и Ollama не делать.
 - Миграция `007_chat_model.sql` этим пакетом разрешена. Новая таблица `chat_model_choices(tenant_id text, chat_id bigint, model_alias text check (model_alias in ('agent', 'coder-cloud')), updated_at timestamptz, primary key (tenant_id, chat_id))`. Колонку в `src/contracts` не добавлять: воркер читает выбор и передаёт алиас в раннер.
