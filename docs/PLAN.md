@@ -52,7 +52,7 @@ todos:
     status: done
   - id: m2-p6
     content: "M2-P6 Приёмка M2"
-    status: in_progress
+    status: done
   - id: m3-p1
     content: "M3-P1 ClaudeSdkRunner по provider из resolveModel"
     status: pending
@@ -772,7 +772,7 @@ M2-4   P6 после P2, P3, P4, P5
 
 ### M2-P6. Приёмка M2
 
-- Волна: M2-4. Зависит от: M2-P2, M2-P3, M2-P4, M2-P5 `done`. Статус: `in_progress`.
+- Волна: M2-4. Зависит от: M2-P2, M2-P3, M2-P4, M2-P5 `done`. Статус: `done`.
 - Пути: `test/acceptance/m2.test.ts` и фикстуры рядом. Продуктовые каталоги не менять.
 - Сделать: семь учений M1 остаются зелёными. Плюс: `record_note` дважды с одним ключом создаёт один файл; `parse_error` на локальной модели следующий запуск того же хода делает внешним алиасом на фейковом клиенте; крон `script` не открывает `ChatModel`.
 - DoD: эти проверки зелёные. Красный продуктовый сценарий не чинить, вернуть владельцу пакета.
