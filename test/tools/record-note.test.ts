@@ -47,6 +47,37 @@ describe("record_note", () => {
     expect(await noteNames(root.root)).toEqual(["one.txt"]);
   });
 
+  it("должен вернуть первый результат, если журнал ключа больше 8 КиБ", async () => {
+    const root = mustJail(jail);
+    const first = await recordNoteTool.execute(
+      { path: "out/one.txt", text: "первая", idempotency_key: "fat" },
+      root.ctx,
+    );
+    const ledgerDir = path.join(root.root, "out", ".record-note");
+    const files = await readdir(ledgerDir);
+    expect(files).toHaveLength(1);
+    const name = files[0];
+    if (name === undefined) {
+      throw new Error("ledger is missing");
+    }
+    const ledgerPath = path.join(ledgerDir, name);
+    const original = await readFile(ledgerPath);
+    const bloated = Buffer.concat([original, Buffer.alloc(8 * 1024, 0x20)]);
+    expect(bloated.length).toBeGreaterThan(8 * 1024);
+    await writeFile(ledgerPath, bloated);
+
+    const second = await recordNoteTool.execute(
+      { path: "out/two.txt", text: "другая", idempotency_key: "fat" },
+      root.ctx,
+    );
+
+    expect(second).toEqual(first);
+    expect(await readFile(path.join(root.root, "out", "one.txt"), "utf8")).toBe("первая");
+    await expect(stat(path.join(root.root, "out", "two.txt"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("должен создать второй файл для другого ключа", async () => {
     const root = mustJail(jail);
     await recordNoteTool.execute(
@@ -140,6 +171,22 @@ describe("record_note", () => {
 
     expect(outcome).toEqual({ ok: false, error: "path escapes root" });
     expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("должен отказать, если out — симлинк на каталог внутри корня, и не записать файл", async () => {
+    const root = mustJail(jail);
+    const elsewhere = path.join(root.root, "elsewhere");
+    await mkdir(elsewhere);
+    await symlink(elsewhere, path.join(root.root, "out"));
+
+    const outcome = await recordNoteTool.execute(
+      { path: "out/note.txt", text: "pwned", idempotency_key: "inside-link" },
+      root.ctx,
+    );
+
+    expect(outcome).toEqual({ ok: false, error: "path escapes root" });
+    await expect(stat(path.join(elsewhere, "note.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(elsewhere)).toEqual([]);
   });
 
   it("должен отказать на симлинк каталога внутри out и не записать файл снаружи", async () => {

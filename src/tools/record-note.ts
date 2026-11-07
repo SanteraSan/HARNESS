@@ -2,7 +2,7 @@
 /* eslint-disable security/detect-non-literal-fs-filename -- путь после тюрьмы I19, литерал невозможен */
 import { createHash } from "node:crypto";
 import { type Stats } from "node:fs";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { z } from "zod";
@@ -23,8 +23,6 @@ const LEDGER_DIR = ".record-note";
 
 /** I19: в файл не пишем больше, чем read_file согласен прочитать. */
 const NOTE_BYTES = 64 * 1024;
-
-const LEDGER_BYTES = 8 * 1024;
 
 const recordNoteParameters = z.object({
   path: z.string().min(1).max(4096).describe("Путь файла внутри каталога out рабочего каталога"),
@@ -72,13 +70,15 @@ async function writeNote(ctx: ToolContext, request: NoteRequest): Promise<ToolOu
   }
 
   const segments = noteSegments(request.path);
-  const target = await resolveNewNote(ctx.fileRoot, segments);
+  const outReal = await openOut(ctx.fileRoot, true);
+  const target = await resolveNewNote(outReal, segments);
   const outcomeText = `wrote ${segments.join("/")}`;
   const raced = await commitNote(
-    ctx.fileRoot,
+    outReal,
     ctx.agentId,
     request.idempotencyKey,
     target,
+    segments.slice(1).join("/"),
     request.text,
     outcomeText,
   );
@@ -131,12 +131,41 @@ function noteSegments(userPath: string): string[] {
   return segments;
 }
 
-async function resolveNewNote(fileRoot: string, segments: readonly string[]): Promise<string> {
+/**
+ * Корень записи — реальный каталог FILE_ROOT/out, не симлинк.
+ * resolveInsideRoot(fileRoot, "out") принимает симлинк на другой каталог внутри корня:
+ * realpath уводит цель из каталога out. Такой out — ошибка, файл не пишется.
+ */
+async function openOut(fileRoot: string, create: true): Promise<string>;
+async function openOut(fileRoot: string, create: false): Promise<string | null>;
+async function openOut(fileRoot: string, create: boolean): Promise<string | null> {
   const rootReal = await resolveInsideRoot(fileRoot, ".");
-  await mkdirIfMissing(path.join(rootReal, OUT_DIR));
-  const outReal = await resolveInsideRoot(fileRoot, OUT_DIR);
-  await assertDirectory(outReal);
+  const outLexical = path.join(rootReal, OUT_DIR);
+  let info = await lstatIfExists(outLexical);
+  if (info !== null && info.isSymbolicLink()) {
+    throw new ToolFailure("path_rejected", "path escapes root");
+  }
+  if (info === null) {
+    if (!create) {
+      return null;
+    }
+    await mkdirIfMissing(outLexical);
+    info = await lstatIfExists(outLexical);
+  }
+  if (info === null || info.isSymbolicLink()) {
+    throw new ToolFailure("path_rejected", "path escapes root");
+  }
+  if (!info.isDirectory()) {
+    throw new ToolFailure("not_a_directory", "not a directory");
+  }
+  const outReal = await resolveInsideRoot(rootReal, OUT_DIR);
+  if (outReal !== outLexical) {
+    throw new ToolFailure("path_rejected", "path escapes root");
+  }
+  return outReal;
+}
 
+async function resolveNewNote(outReal: string, segments: readonly string[]): Promise<string> {
   const inside = segments.slice(1);
   const fileName = inside[inside.length - 1];
   if (fileName === undefined) {
@@ -179,12 +208,10 @@ async function readReplay(
   agentId: string,
   idempotencyKey: string,
 ): Promise<string | null> {
-  const rootReal = await resolveInsideRoot(fileRoot, ".");
-  const outInfo = await statIfExists(path.join(rootReal, OUT_DIR));
-  if (outInfo === null || !outInfo.isDirectory()) {
+  const outReal = await openOut(fileRoot, false);
+  if (outReal === null) {
     return null;
   }
-  const outReal = await resolveInsideRoot(fileRoot, OUT_DIR);
   const ledgerInfo = await statIfExists(path.join(outReal, LEDGER_DIR));
   if (ledgerInfo === null || !ledgerInfo.isDirectory()) {
     return null;
@@ -194,14 +221,14 @@ async function readReplay(
 }
 
 async function commitNote(
-  fileRoot: string,
+  outReal: string,
   agentId: string,
   idempotencyKey: string,
   target: string,
+  relativeInsideOut: string,
   text: string,
   outcomeText: string,
 ): Promise<string | null> {
-  const outReal = await resolveInsideRoot(fileRoot, OUT_DIR);
   await mkdirIfMissing(path.join(outReal, LEDGER_DIR));
   const ledgerDir = await resolveInsideRoot(outReal, LEDGER_DIR);
   await assertDirectory(ledgerDir);
@@ -228,7 +255,10 @@ async function commitNote(
 
   try {
     await writeFile(target, text, { encoding: "utf8", flag: "wx" });
+    // Реальный путь уже созданного файла обязан остаться внутри каталога out.
+    await resolveInsideRoot(outReal, relativeInsideOut);
   } catch (error) {
+    await rm(target, { force: true });
     await rm(ledgerFile, { force: true });
     throw error;
   }
@@ -266,13 +296,11 @@ async function readLedger(ledgerFile: string): Promise<string | null> {
   if (info === null) {
     return null;
   }
-  if (!info.isFile() || info.size > LEDGER_BYTES) {
+  if (!info.isFile()) {
     throw new ToolFailure("bad_ledger", "tool failed");
   }
+  // Размер журнала не превращает повтор ключа в ошибку: возвращается первый результат.
   const raw = await readFile(ledgerFile);
-  if (raw.length > LEDGER_BYTES) {
-    throw new ToolFailure("bad_ledger", "tool failed");
-  }
   let decoded: string;
   try {
     decoded = new TextDecoder("utf-8", { fatal: true }).decode(raw);
@@ -293,7 +321,7 @@ function parseLedger(raw: string): string {
     throw new ToolFailure("bad_ledger", "tool failed");
   }
   const text = value.text;
-  if (typeof text !== "string" || text.length === 0 || text.length > 4200) {
+  if (typeof text !== "string" || text.length === 0) {
     throw new ToolFailure("bad_ledger", "tool failed");
   }
   return text;
@@ -322,6 +350,17 @@ async function mkdirIfMissing(directory: string): Promise<void> {
     if (errorCode(error) !== "EEXIST") {
       throw error;
     }
+  }
+}
+
+async function lstatIfExists(target: string): Promise<Stats | null> {
+  try {
+    return await lstat(target);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
+      return null;
+    }
+    throw error;
   }
 }
 
