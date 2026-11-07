@@ -14,6 +14,7 @@ import type {
   Tool,
 } from "./contracts/index.js";
 import { createSql, type Sql } from "./db/client.js";
+import { createDelegationTools } from "./delegation/index.js";
 import { createRunJournal, type RunJournal } from "./journal/index.js";
 import { LiteLLMChatModel, collectSecrets } from "./model/index.js";
 import { createRunQueue } from "./queue/index.js";
@@ -388,8 +389,11 @@ function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): Worke
     harnessApiToken: config.harnessApiToken,
     telegramBotToken: config.telegramBotToken,
   });
+  // Одна очередь процесса: дочерняя строка ждёт следующий захват этого воркера.
+  const queue = createRunQueue(sql);
+  const delegation = createDelegationTools({ sql, queue });
   return {
-    queue: createRunQueue(sql),
+    queue,
     journal: createRunJournal(sql, secrets),
     model: new LiteLLMChatModel({
       baseUrl: config.litellmBaseUrl,
@@ -405,7 +409,8 @@ function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): Worke
       // Тот же пул процесса: правила и cost_usd не открывают второе соединение.
       sql,
     }),
-    tools: toolRegistry,
+    // Allowlist агента по-прежнему решает, попадут ли эти имена в ход модели.
+    tools: [...toolRegistry, delegation.createSubtask, delegation.approve],
     workerId: config.workerId,
     leaseSeconds: config.leaseSeconds,
     heartbeatSeconds: config.heartbeatSeconds,
