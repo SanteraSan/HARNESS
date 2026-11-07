@@ -18,7 +18,9 @@ import { createDelegationTools } from "./delegation/index.js";
 import { createRunJournal, type RunJournal } from "./journal/index.js";
 import { LiteLLMChatModel, collectSecrets } from "./model/index.js";
 import { createRunQueue } from "./queue/index.js";
+import { ClaudeSdkRunner, unavailableClaudeSdkClient } from "./runner/claude-sdk.js";
 import { OpenAICompatRunner, type RunnerAgent } from "./runner/index.js";
+import { resolveModel } from "./routing/resolve.js";
 import { toolRegistry } from "./tools/index.js";
 
 /** Пустая очередь: одна секунда, затем снова reap и один захват. */
@@ -30,6 +32,20 @@ const MAX_TIMER_MS = 2_147_483_647;
 const RUNNER_FAILED = "runner_failed";
 
 /**
+ * Две реализации на один захват.
+ * Нет поля — остаётся единственный runner из опций: тесты M1 подставляют один объект.
+ * Процесс воркера поле задаёт и на каждом захвате зовёт resolveModel.
+ */
+export interface RunnerSelection {
+  /** Уже созданный OpenAI-совместимый раннер. Для local новый объект не строится. */
+  local: Runner;
+  /** Вызывается только когда resolveModel вернул external. */
+  createExternal(): Runner;
+  loadAgent(agentId: string): Promise<RunnerAgent>;
+  sql: Sql;
+}
+
+/**
  * Один процесс — один текущий запуск.
  * Итерация делает reap, затем один захват. Второй не начинается, пока Runner не вернулся.
  * Сигнал не ставит успешный статус: процесс выходит, аренду снимет следующий reap.
@@ -37,6 +53,8 @@ const RUNNER_FAILED = "runner_failed";
 export interface WorkerLoopOptions {
   queue: RunQueue;
   runner: Runner;
+  /** Выбор local / external. Захват при этом остаётся один. */
+  selection?: RunnerSelection;
   journal: RunJournal;
   model: ChatModel;
   tools: readonly Tool[];
@@ -174,7 +192,8 @@ async function runClaimed(options: WorkerLoopOptions, claimed: ClaimedRun): Prom
   gate.timer = timer;
 
   try {
-    await options.runner.run(claimed, runnerContext(options, gate));
+    const runner = await selectRunner(options, claimed);
+    await runner.run(claimed, runnerContext(options, gate));
   } catch (error: unknown) {
     logger.error({ run_id: claimed.id, err: error }, "runner failed");
     await failOwnedRun(options, claimed.id, gate);
@@ -185,6 +204,39 @@ async function runClaimed(options: WorkerLoopOptions, claimed: ClaimedRun): Prom
       gate.timer = undefined;
     }
   }
+}
+
+/**
+ * I1: модель остаётся за Runner. Провайдер берётся из resolveModel этого запуска.
+ * На захвате эффектов инструментов ещё нет, поэтому смена алиаса внутри хода
+ * остаётся в OpenAICompatRunner. Второй захват отсюда не делается.
+ * local не вызывает createExternal: SDK-раннер для него не создаётся.
+ */
+async function selectRunner(options: WorkerLoopOptions, claimed: ClaimedRun): Promise<Runner> {
+  const selection = options.selection;
+  if (selection === undefined) {
+    return options.runner;
+  }
+
+  const agent = await selection.loadAgent(claimed.agentId);
+  if (agent.id !== claimed.agentId) {
+    throw new WorkerError("agent_mismatch", "agent does not match the run");
+  }
+
+  const resolved = await resolveModel(
+    selection.sql,
+    {
+      id: agent.id,
+      tenantId: claimed.tenantId,
+      modelAlias: agent.modelAlias,
+      provider: agent.provider,
+    },
+    { toolEffects: [] },
+  );
+  if (resolved.provider === "local") {
+    return selection.local;
+  }
+  return selection.createExternal();
 }
 
 function runnerContext(options: WorkerLoopOptions, gate: LockGate): RunnerContext {
@@ -392,6 +444,17 @@ function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): Worke
   // Одна очередь процесса: дочерняя строка ждёт следующий захват этого воркера.
   const queue = createRunQueue(sql);
   const delegation = createDelegationTools({ sql, queue });
+  const localRunner = new OpenAICompatRunner({
+    loadAgent(agentId: string): Promise<RunnerAgent> {
+      return loadRunnerAgent(sql, agentId);
+    },
+    fileRoot: config.fileRoot,
+    secrets,
+    // Тот же пул процесса: правила и cost_usd не открывают второе соединение.
+    sql,
+  });
+  // Пакет SDK не установлен: клиент передаётся снаружи класса и живёт только для external.
+  const sdkClient = unavailableClaudeSdkClient();
   return {
     queue,
     journal: createRunJournal(sql, secrets),
@@ -400,15 +463,17 @@ function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): Worke
       apiKey: config.litellmApiKey,
       secrets,
     }),
-    runner: new OpenAICompatRunner({
+    runner: localRunner,
+    selection: {
+      local: localRunner,
+      createExternal(): Runner {
+        return new ClaudeSdkRunner({ client: sdkClient });
+      },
       loadAgent(agentId: string): Promise<RunnerAgent> {
         return loadRunnerAgent(sql, agentId);
       },
-      fileRoot: config.fileRoot,
-      secrets,
-      // Тот же пул процесса: правила и cost_usd не открывают второе соединение.
       sql,
-    }),
+    },
     // Allowlist агента по-прежнему решает, попадут ли эти имена в ход модели.
     tools: [...toolRegistry, delegation.createSubtask, delegation.approve],
     workerId: config.workerId,
