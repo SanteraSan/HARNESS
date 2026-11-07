@@ -5,16 +5,19 @@ import { describe, expect, it } from "vitest";
 import type { Tool, ToolEffect, ToolOutcome } from "../../src/contracts/types.js";
 import { listDirTool } from "../../src/tools/list-dir.js";
 import { readFileTool } from "../../src/tools/read-file.js";
+import { recordNoteTool } from "../../src/tools/record-note.js";
 import { decideToolCall, modelToolsForAllowlist, toolRegistry } from "../../src/tools/registry.js";
 
 describe("tool registry", () => {
-  it("должен объявить у read_file и list_dir effect read", () => {
+  it("должен объявить у read_file и list_dir effect read, а у record_note effect write", () => {
     expect(toolRegistry.map((tool) => [tool.name, tool.effect])).toEqual([
       ["read_file", "read"],
       ["list_dir", "read"],
+      ["record_note", "write"],
     ]);
     expect(readFileTool.effect).toBe("read");
     expect(listDirTool.effect).toBe("read");
+    expect(recordNoteTool.effect).toBe("write");
   });
 
   it("должен не включать Bash в список для модели", async () => {
@@ -72,15 +75,21 @@ describe("tool registry", () => {
     expect(spy.executed()).toBe(false);
   });
 
-  it("должен не отдать модели инструмент с effect write", async () => {
+  it("должен отдать модели allowlisted инструмент с effect write и не вызывать execute", async () => {
     const writing = spyTool("write_file", "write");
 
     const specs = modelToolsForAllowlist(["write_file", "read_file"], [writing.tool, readFileTool]);
     const decision = decideToolCall("write_file", ["write_file"], [writing.tool]);
+    const denied = decideToolCall("write_file", ["read_file"], [writing.tool]);
     await Promise.resolve();
 
-    expect(specs.map((spec) => spec.name)).toEqual(["read_file"]);
-    expect(decision).toEqual({ ok: false, error: "tool denied" });
+    expect(specs.map((spec) => spec.name)).toEqual(["write_file", "read_file"]);
+    expect(decision.ok).toBe(true);
+    if (decision.ok) {
+      expect(decision.tool).toBe(writing.tool);
+      expect(decision.tool.effect).toBe("write");
+    }
+    expect(denied).toEqual({ ok: false, error: "tool denied" });
     expect(writing.executed()).toBe(false);
   });
 });
