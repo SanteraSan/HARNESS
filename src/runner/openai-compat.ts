@@ -3,6 +3,7 @@ import {
   type ClaimedRun,
   type FinishOutcome,
   type ModelMessage,
+  type ModelOutput,
   type NewRunStep,
   type Provider,
   type Runner,
@@ -10,8 +11,10 @@ import {
   type Tool,
   type ToolCall,
   type ToolContext,
+  type ToolEffect,
 } from "../contracts/index.js";
 import { logger } from "../config.js";
+import type { Sql } from "../db/client.js";
 import { redact } from "../model/redact.js";
 import { resolveModel } from "../routing/resolve.js";
 import { decideToolCall, modelToolsForAllowlist } from "../tools/index.js";
@@ -42,6 +45,8 @@ export interface OpenAICompatRunnerOptions {
   loadAgent: (agentId: string) => Promise<RunnerAgent>;
   fileRoot: string;
   secrets: readonly string[];
+  /** Пул процесса. Без него алиас остаётся полем агента: второго пула раннер не открывает. */
+  sql?: Sql;
 }
 
 interface TokenTotals {
@@ -72,6 +77,7 @@ export class OpenAICompatRunner implements Runner {
   private readonly loadAgent: (agentId: string) => Promise<RunnerAgent>;
   private readonly fileRoot: string;
   private readonly secrets: readonly string[];
+  private readonly sql: Sql | undefined;
 
   constructor(options: OpenAICompatRunnerOptions) {
     if (options.fileRoot.trim().length === 0) {
@@ -80,12 +86,11 @@ export class OpenAICompatRunner implements Runner {
     this.loadAgent = options.loadAgent;
     this.fileRoot = options.fileRoot;
     this.secrets = [...options.secrets];
+    this.sql = options.sql;
   }
 
   async run(claimed: ClaimedRun, ctx: RunnerContext): Promise<void> {
     const agent = await this.requireAgent(claimed.agentId);
-    // I10: алиас берётся из строки агента, внешнего переключения нет.
-    const resolved = resolveModel(agent);
     const allowlist = [...agent.toolAllowlist];
     const tools = modelToolsForAllowlist(allowlist, ctx.tools);
     const messages = initialMessages(agent.systemPrompt, claimed.payload.message);
@@ -94,6 +99,11 @@ export class OpenAICompatRunner implements Runner {
       runId: claimed.id,
       agentId: claimed.agentId,
       fileRoot: this.fileRoot,
+    };
+    const seenEffects: ToolEffect[] = [];
+    let resolved: ResolvedAlias = {
+      modelAlias: agent.modelAlias,
+      provider: agent.provider,
     };
 
     for (let attempt = 1; attempt <= agent.maxSteps; attempt += 1) {
@@ -104,10 +114,16 @@ export class OpenAICompatRunner implements Runner {
         return;
       }
 
-      await ctx.appendStep({
-        ...baseStep(claimed.id, "model_request"),
-        requestExcerpt: this.mask(`${resolved.modelAlias}\n${claimed.payload.message}`),
-      });
+      resolved = await this.resolveAlias(agent, claimed.tenantId, seenEffects);
+      let cost = costFor(resolved.provider, null);
+      const requestStep = await this.writeStep(
+        ctx,
+        {
+          ...baseStep(claimed.id, "model_request"),
+          requestExcerpt: this.mask(`${resolved.modelAlias}\n${claimed.payload.message}`),
+        },
+        cost,
+      );
 
       logger.info({ run_id: claimed.id, model: resolved.modelAlias, attempt }, "model request");
       const output = await ctx.model.complete({
@@ -118,10 +134,15 @@ export class OpenAICompatRunner implements Runner {
       });
       totals.promptTokens = addTokens(totals.promptTokens, output.promptTokens);
       totals.completionTokens = addTokens(totals.completionTokens, output.completionTokens);
+      cost = costFor(resolved.provider, output);
+      if (requestStep.costUsd !== cost) {
+        requestStep.costUsd = cost;
+        await this.reviseModelRequestCost(ctx, claimed.id, cost);
+      }
 
       const interpreted = interpretModelOutput(output);
       if (interpreted.type === "final") {
-        await this.finishFinal(ctx, claimed.id, resolved, totals, interpreted.text);
+        await this.finishFinal(ctx, claimed.id, resolved, totals, interpreted.text, cost);
         return;
       }
       if (interpreted.type === "parse_error") {
@@ -133,6 +154,7 @@ export class OpenAICompatRunner implements Runner {
           totals,
           interpreted.reason,
           output.content,
+          cost,
         );
         return;
       }
@@ -145,6 +167,8 @@ export class OpenAICompatRunner implements Runner {
         messages,
         output.content,
         interpreted.calls,
+        cost,
+        seenEffects,
       );
     }
 
@@ -171,18 +195,43 @@ export class OpenAICompatRunner implements Runner {
     return redact(text, this.secrets);
   }
 
+  private async resolveAlias(
+    agent: RunnerAgent,
+    tenantId: string,
+    toolEffects: readonly ToolEffect[],
+  ): Promise<ResolvedAlias> {
+    if (this.sql === undefined) {
+      return { modelAlias: agent.modelAlias, provider: agent.provider };
+    }
+    return resolveModel(
+      this.sql,
+      {
+        id: agent.id,
+        tenantId,
+        modelAlias: agent.modelAlias,
+        provider: agent.provider,
+      },
+      { toolEffects },
+    );
+  }
+
   private async finishFinal(
     ctx: RunnerContext,
     runId: string,
     resolved: ResolvedAlias,
     totals: TokenTotals,
     text: string,
+    cost: number | null,
   ): Promise<void> {
     const visible = this.mask(text);
-    await ctx.appendStep({
-      ...baseStep(runId, "final"),
-      responseExcerpt: visible,
-    });
+    await this.writeStep(
+      ctx,
+      {
+        ...baseStep(runId, "final"),
+        responseExcerpt: visible,
+      },
+      cost,
+    );
     await commitOutcome(ctx, runId, outcomeFor(resolved, totals, "succeeded", visible, null));
   }
 
@@ -193,13 +242,18 @@ export class OpenAICompatRunner implements Runner {
     totals: TokenTotals,
     reason: "empty" | "json_in_text",
     content: string | null,
+    cost: number | null,
   ): Promise<void> {
     const excerpt = content === null || content.trim() === "" ? null : this.mask(content);
-    await ctx.appendStep({
-      ...baseStep(runId, "parse_error"),
-      responseExcerpt: excerpt,
-      error: reason,
-    });
+    await this.writeStep(
+      ctx,
+      {
+        ...baseStep(runId, "parse_error"),
+        responseExcerpt: excerpt,
+        error: reason,
+      },
+      cost,
+    );
     await commitOutcome(ctx, runId, outcomeFor(resolved, totals, "failed", null, reason));
   }
 
@@ -211,7 +265,10 @@ export class OpenAICompatRunner implements Runner {
     messages: ModelMessage[],
     content: string | null,
     calls: readonly ToolCall[],
+    cost: number | null,
+    seenEffects: ToolEffect[],
   ): Promise<void> {
+    noteCalledEffects(calls, ctx.tools, seenEffects);
     messages.push({
       role: "assistant",
       content: content === null ? null : this.mask(content),
@@ -224,28 +281,43 @@ export class OpenAICompatRunner implements Runner {
     });
 
     for (const call of calls) {
-      await ctx.appendStep({
-        ...baseStep(runId, "tool_call"),
-        toolName: call.name,
-        requestExcerpt: this.mask(call.arguments),
-      });
+      await this.writeStep(
+        ctx,
+        {
+          ...baseStep(runId, "tool_call"),
+          toolName: call.name,
+          requestExcerpt: this.mask(call.arguments),
+        },
+        cost,
+      );
 
       // I3: запрет сильнее allowlist. Имя вне списка тоже не доходит до execute.
       const decision = decideToolCall(call.name, allowlist, ctx.tools);
       if (!decision.ok) {
         const denial = this.mask(decision.error);
-        await ctx.appendStep({
-          ...baseStep(runId, "policy_deny"),
-          toolName: call.name,
-          requestExcerpt: this.mask(call.arguments),
-          responseExcerpt: denial,
-          error: denial,
-        });
+        await this.writeStep(
+          ctx,
+          {
+            ...baseStep(runId, "policy_deny"),
+            toolName: call.name,
+            requestExcerpt: this.mask(call.arguments),
+            responseExcerpt: denial,
+            error: denial,
+          },
+          cost,
+        );
         messages.push(toolMessage(call.id, denial));
         continue;
       }
 
-      const visible = await this.executeAllowed(ctx, runId, decision.tool, call, toolContext);
+      const visible = await this.executeAllowed(
+        ctx,
+        runId,
+        decision.tool,
+        call,
+        toolContext,
+        cost,
+      );
       messages.push(toolMessage(call.id, visible));
     }
   }
@@ -256,11 +328,12 @@ export class OpenAICompatRunner implements Runner {
     tool: Tool,
     call: ToolCall,
     toolContext: ToolContext,
+    cost: number | null,
   ): Promise<string> {
     const parsed = parseArguments(call.arguments);
     if (!parsed.ok) {
       const visible = this.mask("invalid arguments");
-      await this.appendToolResult(ctx, runId, call, visible, visible);
+      await this.appendToolResult(ctx, runId, call, visible, visible, cost);
       return visible;
     }
 
@@ -268,16 +341,16 @@ export class OpenAICompatRunner implements Runner {
       const outcome = await tool.execute(parsed.value, toolContext);
       if (outcome.ok) {
         const visible = this.mask(outcome.text);
-        await this.appendToolResult(ctx, runId, call, visible, null);
+        await this.appendToolResult(ctx, runId, call, visible, null, cost);
         return visible;
       }
       const visible = this.mask(outcome.error);
-      await this.appendToolResult(ctx, runId, call, visible, visible);
+      await this.appendToolResult(ctx, runId, call, visible, visible, cost);
       return visible;
     } catch (error) {
       logger.warn({ run_id: runId, err: error, tool: tool.name }, "tool failed");
       const visible = this.mask(exceptionText(error));
-      await this.appendToolResult(ctx, runId, call, visible, visible);
+      await this.appendToolResult(ctx, runId, call, visible, visible, cost);
       return visible;
     }
   }
@@ -288,15 +361,129 @@ export class OpenAICompatRunner implements Runner {
     call: ToolCall,
     visible: string,
     error: string | null,
+    cost: number | null,
   ): Promise<void> {
-    await ctx.appendStep({
-      ...baseStep(runId, "tool_result"),
-      toolName: call.name,
-      requestExcerpt: this.mask(call.arguments),
-      responseExcerpt: visible,
-      error,
-    });
+    await this.writeStep(
+      ctx,
+      {
+        ...baseStep(runId, "tool_result"),
+        toolName: call.name,
+        requestExcerpt: this.mask(call.arguments),
+        responseExcerpt: visible,
+        error,
+      },
+      cost,
+    );
   }
+
+  private async writeStep(
+    ctx: RunnerContext,
+    step: NewRunStep,
+    cost: number | null,
+  ): Promise<NewRunStep> {
+    const stored: NewRunStep = { ...step, costUsd: cost };
+    await ctx.appendStep(stored);
+    await this.persistStepCost(ctx, stored.runId, cost);
+    return stored;
+  }
+
+  /**
+   * Журнал вставляет шаг без cost_usd. Число дописывается отдельным update,
+   * и только пока лок ещё наш: ноль строк значит, что строку запуска уже отпустили.
+   */
+  private async persistStepCost(
+    ctx: RunnerContext,
+    runId: string,
+    cost: number | null,
+  ): Promise<void> {
+    const sql = this.sql;
+    if (sql === undefined) {
+      return;
+    }
+    const amount = numericCost(cost);
+    await sql`
+      update run_steps
+      set cost_usd = ${amount}::numeric
+      where id = (
+        select step.id
+        from run_steps as step
+        join runs as owned on owned.id = step.run_id
+        where step.run_id = ${runId}
+          and owned.status = 'running'
+          and owned.locked_by = ${ctx.workerId}
+        order by step.step_index desc
+        limit 1
+      )
+    `;
+  }
+
+  private async reviseModelRequestCost(
+    ctx: RunnerContext,
+    runId: string,
+    cost: number | null,
+  ): Promise<void> {
+    const sql = this.sql;
+    if (sql === undefined) {
+      return;
+    }
+    const amount = numericCost(cost);
+    await sql`
+      update run_steps
+      set cost_usd = ${amount}::numeric
+      where id = (
+        select step.id
+        from run_steps as step
+        join runs as owned on owned.id = step.run_id
+        where step.run_id = ${runId}
+          and step.kind = 'model_request'
+          and owned.status = 'running'
+          and owned.locked_by = ${ctx.workerId}
+        order by step.step_index desc
+        limit 1
+      )
+    `;
+  }
+}
+
+function noteCalledEffects(
+  calls: readonly ToolCall[],
+  tools: readonly Tool[],
+  seenEffects: ToolEffect[],
+): void {
+  for (const call of calls) {
+    const tool = findNamedTool(call.name, tools);
+    if (tool !== undefined) {
+      seenEffects.push(tool.effect);
+    }
+  }
+}
+
+function findNamedTool(name: string, tools: readonly Tool[]): Tool | undefined {
+  for (const tool of tools) {
+    if (tool.name === name) {
+      return tool;
+    }
+  }
+  return undefined;
+}
+
+/** Локальный ход всегда 0. У внешнего хода число берётся из ответа, иначе null. */
+function costFor(provider: Provider, output: ModelOutput | null): number | null {
+  if (provider === "local") {
+    return 0;
+  }
+  const cost = output?.costUsd;
+  if (typeof cost === "number" && Number.isFinite(cost)) {
+    return cost;
+  }
+  return null;
+}
+
+function numericCost(cost: number | null): string | null {
+  if (cost === null) {
+    return null;
+  }
+  return String(cost);
 }
 
 function initialMessages(systemPrompt: string, message: string): ModelMessage[] {

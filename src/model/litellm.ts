@@ -31,6 +31,7 @@ const toolCallSchema = z.object({
 
 const completionSchema = z.object({
   model: z.string().optional(),
+  response_cost: z.unknown().optional(),
   choices: z
     .array(
       z.object({
@@ -48,6 +49,7 @@ const completionSchema = z.object({
     .object({
       prompt_tokens: z.number().int().nonnegative().nullable().optional(),
       completion_tokens: z.number().int().nonnegative().nullable().optional(),
+      cost: z.unknown().optional(),
     })
     .nullable()
     .optional(),
@@ -302,7 +304,27 @@ function toModelOutput(input: ModelInput, body: CompletionBody): ModelOutput {
     promptTokens: body.usage?.prompt_tokens ?? null,
     completionTokens: body.usage?.completion_tokens ?? null,
     model: reported !== undefined && reported.length > 0 ? reported : input.model,
+    // Нет конечного числа — null, ход при этом уже разобран и не отбрасывается.
+    costUsd: costFromBody(body),
   };
+}
+
+function costFromBody(body: CompletionBody): number | null {
+  const usage = body.usage;
+  if (usage != null && usage.cost !== undefined) {
+    return finiteNumber(usage.cost);
+  }
+  if (body.response_cost !== undefined) {
+    return finiteNumber(body.response_cost);
+  }
+  return null;
+}
+
+function finiteNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return value;
 }
 
 function transportError(error: unknown, secrets: readonly string[]): ModelError {

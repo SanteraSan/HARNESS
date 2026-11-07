@@ -111,6 +111,11 @@ export interface ModelOutput {
   promptTokens: number | null;
   completionTokens: number | null;
   model: string;
+  /**
+   * Число стоимости из ответа, если оно было.
+   * Поле можно не задавать: для раннера это то же самое, что null.
+   */
+  costUsd?: number | null;
 }
 
 export interface ChatModel {
@@ -167,6 +172,8 @@ export interface NewRunStep {
   promptTokens: number | null;
   completionTokens: number | null;
   error: string | null;
+  /** cost_usd хода: local пишет 0, внешний ответ без числа — null. */
+  costUsd?: number | null;
 }
 
 export interface RunnerContext {

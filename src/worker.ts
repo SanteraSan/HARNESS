@@ -402,6 +402,8 @@ function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): Worke
       },
       fileRoot: config.fileRoot,
       secrets,
+      // Тот же пул процесса: правила и cost_usd не открывают второе соединение.
+      sql,
     }),
     tools: toolRegistry,
     workerId: config.workerId,

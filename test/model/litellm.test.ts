@@ -116,6 +116,7 @@ describe("LiteLLMChatModel", () => {
           promptTokens: 11,
           completionTokens: 2,
           model: "agent",
+          costUsd: null,
         } satisfies ModelOutput);
       },
     );
@@ -154,6 +155,7 @@ describe("LiteLLMChatModel", () => {
           promptTokens: 5,
           completionTokens: 0,
           model: "qwen-alias",
+          costUsd: null,
         } satisfies ModelOutput);
         expect(output.toolCalls[0]?.arguments).toBe('{"path":"a.txt"}');
       },
@@ -172,6 +174,7 @@ describe("LiteLLMChatModel", () => {
           promptTokens: null,
           completionTokens: null,
           model: "agent",
+          costUsd: null,
         } satisfies ModelOutput);
       },
     );
@@ -307,6 +310,70 @@ describe("LiteLLMChatModel", () => {
           apiKey: `${apiKey}\nInjected: 1`,
         }),
     ).toThrow(ModelError);
+  });
+
+  it("должен забрать число стоимости из usage.cost и не подменять его response_cost", async () => {
+    await withServer(
+      {
+        status: 200,
+        body: {
+          model: "coder-cloud",
+          choices: [{ message: { role: "assistant", content: "готово" } }],
+          usage: { prompt_tokens: 3, completion_tokens: 4, cost: 0.25 },
+          response_cost: 9,
+        },
+      },
+      async ({ baseUrl }) => {
+        const model = new LiteLLMChatModel({ baseUrl, apiKey });
+        const output = await model.complete(userInput({ model: "coder-cloud" }));
+        expect(output.costUsd).toBe(0.25);
+        expect(output.content).toBe("готово");
+        expect(output.promptTokens).toBe(3);
+        expect(output.completionTokens).toBe(4);
+      },
+    );
+  });
+
+  it("должен взять response_cost, если в usage нет cost, и оставить 0 числом", async () => {
+    await withServer(
+      {
+        status: 200,
+        body: {
+          model: "coder-cloud",
+          choices: [{ message: { role: "assistant", content: "ноль" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+          response_cost: 0,
+        },
+      },
+      async ({ baseUrl }) => {
+        const model = new LiteLLMChatModel({ baseUrl, apiKey });
+        const output = await model.complete(userInput());
+        expect(output.costUsd).toBe(0);
+        expect(output.content).toBe("ноль");
+      },
+    );
+  });
+
+  it("должен вернуть costUsd null и разобрать текст, если стоимость не число", async () => {
+    await withServer(
+      {
+        status: 200,
+        body: {
+          model: "coder-cloud",
+          choices: [{ message: { role: "assistant", content: "без цены" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, cost: "0.25" },
+        },
+      },
+      async ({ baseUrl }) => {
+        const model = new LiteLLMChatModel({ baseUrl, apiKey });
+        const output = await model.complete(userInput());
+        expect(output).toMatchObject({
+          content: "без цены",
+          toolCalls: [],
+          costUsd: null,
+        });
+      },
+    );
   });
 });
 
