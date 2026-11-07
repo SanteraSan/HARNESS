@@ -2,13 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import type { EnqueueInput } from "../../src/contracts/types.js";
 import { createTelegramBot } from "../../src/telegram/bot.js";
+import type { DialogMessage } from "../../src/telegram/buffer.js";
 import {
+  BUFFER_BEHIND_TEXT,
   INVALID_UPDATE_TEXT,
   MESSAGE_LIMIT,
   POLL_LIMIT_MS,
   partsFromMessage,
   pollOutgoing,
   pollStep,
+  replyForBuffered,
   viewFromParts,
   type RunSnapshot,
   type TelegramUpdateView,
@@ -168,17 +171,73 @@ describe("handleTelegramUpdate", () => {
     expect(result.followRunId).toBeNull();
   });
 
-  it("должен превратить dialog_busy в текст с id живого запуска", async () => {
+  it("должен сохранить текст занятого чата и назвать id живого запуска", async () => {
     const recorded = recordingEnqueue({ runId: LIVE_RUN_ID, reason: "dialog_busy" });
+    const saved: DialogMessage[] = [];
     const result = await handleTelegramUpdate(textView("ещё раз", "7", "16"), {
       allowedUserIds: ALLOWED,
       agentId: AGENT_ID,
       enqueue: recorded.enqueue,
+      rememberBusy: (message) => {
+        saved.push(message);
+        return Promise.resolve();
+      },
     });
 
-    expect(result.text).toBe(`Новый запуск не создан. Живой запуск ${LIVE_RUN_ID}.`);
+    expect(recorded.calls).toHaveLength(1);
+    expect(saved).toEqual([
+      {
+        tenantId: "local",
+        agentId: AGENT_ID,
+        chatId: 9223372036854775807n,
+        idempotencyKey: `tg:${AGENT_ID}:16`,
+        message: "ещё раз",
+      },
+    ]);
+    expect(typeof saved[0]?.chatId).toBe("bigint");
+    expect(result.text).toBe(replyForBuffered(LIVE_RUN_ID));
     expect(result.text).toContain(LIVE_RUN_ID);
     expect(result.followRunId).toBe(LIVE_RUN_ID);
+  });
+
+  it("должен при непустом буфере сохранить текст и не звать enqueue", async () => {
+    const recorded = recordingEnqueue({ runId: CREATED_RUN_ID, reason: "created" });
+    const saved: DialogMessage[] = [];
+    const result = await handleTelegramUpdate(textView("хвост", "7", "18"), {
+      allowedUserIds: ALLOWED,
+      agentId: AGENT_ID,
+      enqueue: recorded.enqueue,
+      rememberBusy: (message) => {
+        saved.push(message);
+        return Promise.resolve();
+      },
+      hasPendingBuffer: () => Promise.resolve(true),
+      findExistingRun: () => Promise.resolve(null),
+    });
+
+    expect(recorded.calls).toEqual([]);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.message).toBe("хвост");
+    expect(typeof saved[0]?.chatId).toBe("bigint");
+    expect(result.text).toBe(BUFFER_BEHIND_TEXT);
+    expect(result.followRunId).toBeNull();
+    expect(result.wakeBuffer).toBe(true);
+  });
+
+  it("должен на уже известный ключ вернуть тот же id и не звать enqueue", async () => {
+    const recorded = recordingEnqueue({ runId: CREATED_RUN_ID, reason: "created" });
+    const result = await handleTelegramUpdate(textView("прочитай README"), {
+      allowedUserIds: ALLOWED,
+      agentId: AGENT_ID,
+      enqueue: recorded.enqueue,
+      rememberBusy: () => Promise.reject(new Error("buffer")),
+      hasPendingBuffer: () => Promise.resolve(true),
+      findExistingRun: () => Promise.resolve(CREATED_RUN_ID),
+    });
+
+    expect(recorded.calls).toEqual([]);
+    expect(result.followRunId).toBe(CREATED_RUN_ID);
+    expect(result.text).toBe(`Этот запуск уже есть. ${CREATED_RUN_ID}`);
   });
 
   it("должен на повтор ключа вернуть тот же id", async () => {

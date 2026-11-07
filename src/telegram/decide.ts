@@ -116,6 +116,14 @@ export function replyForEnqueue(result: {
   return `Новый запуск не создан. Живой запуск ${result.runId}.`;
 }
 
+/** Текст бота, когда сообщение легло в буфер за живым запуском. */
+export function replyForBuffered(liveRunId: string): string {
+  return `Сообщение сохранено. Поставлю его в очередь после запуска ${liveRunId}.`;
+}
+
+/** Буфер уже не пуст: новый текст встаёт в хвост и не обгоняет его. */
+export const BUFFER_BEHIND_TEXT = "Сообщение сохранено. Оно встанет в очередь следом.";
+
 export interface RunSnapshot {
   id: string;
   status: RunStatus;
@@ -130,16 +138,25 @@ export interface PollOutgoing {
 
 /**
  * Текст итога от записи запуска.
- * Повтор того же id не даёт исходящего: множество уже отправленных живёт у вызывающего.
- * В базу отметка доставки не пишется.
+ * Повтор того же id в переданном множестве не даёт исходящего.
+ * Эта функция базу не трогает: устойчивую отметку пишет prepareRunDelivery.
  */
 export function pollOutgoing(run: RunSnapshot, delivered: ReadonlySet<string>): PollOutgoing {
-  if (!isTerminalStatus(run.status) || delivered.has(run.id)) {
+  const text = outgoingText(run);
+  if (text === null || delivered.has(run.id)) {
     return { text: null, delivered };
   }
   const next = new Set(delivered);
   next.add(run.id);
-  return { text: terminalText(run), delivered: next };
+  return { text, delivered: next };
+}
+
+/** null, пока статус не конечный. Иначе текст, который ушёл бы в чат. */
+export function outgoingText(run: RunSnapshot): string | null {
+  if (!isTerminalStatus(run.status)) {
+    return null;
+  }
+  return terminalText(run);
 }
 
 export interface PollStep {
@@ -242,7 +259,7 @@ function isAllowed(userId: string | null, allowedUserIds: readonly string[]): bo
   return false;
 }
 
-function isTerminalStatus(status: RunStatus): boolean {
+export function isTerminalStatus(status: RunStatus): boolean {
   return status === "succeeded" || status === "failed" || status === "cancelled";
 }
 

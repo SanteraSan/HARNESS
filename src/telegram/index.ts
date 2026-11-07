@@ -1,9 +1,20 @@
 import { errorCode, isMainModule, loadConfig, logger } from "../config.js";
 import { createSql, type Sql } from "../db/client.js";
 import { createRunQueue } from "../queue/index.js";
-import { createTelegramBot } from "./bot.js";
+import {
+  findExistingRun,
+  hasPendingDialog,
+  releaseNextBuffered,
+  releaseReadyDialogs,
+  saveDialogMessage,
+} from "./buffer.js";
+import { createTelegramBot, type FollowBridge } from "./bot.js";
+import { parseDecimalChatId } from "./chat-id.js";
+import { POLL_INTERVAL_MS } from "./decide.js";
+import { prepareRunDelivery } from "./delivery.js";
 import { TelegramError } from "./errors.js";
 import type { DeliveryMemory } from "./follow.js";
+import type { TelegramEnqueue } from "./handle.js";
 import { findLocalAgentId, readRunSnapshot } from "./read-run.js";
 
 /**
@@ -53,27 +64,42 @@ async function serve(
   const abort = new AbortController();
   const follows = new Set<Promise<void>>();
   let stopping = false;
+  const enqueueTelegram: TelegramEnqueue = async (input) => {
+    const result = await queue.enqueue(input);
+    return { runId: result.run.id, reason: result.reason };
+  };
+  const track = (task: Promise<void>): void => {
+    follows.add(task);
+    void task.finally(() => {
+      follows.delete(task);
+    });
+  };
+  // Насос буфера вызывает follow только после того, как бот его записал.
+  const followBridge: FollowBridge = {
+    follow() {
+      return undefined;
+    },
+  };
 
   const bot = createTelegramBot({
     token,
     allowedUserIds,
     agentId,
-    enqueue: async (input) => {
-      const result = await queue.enqueue(input);
-      return { runId: result.run.id, reason: result.reason };
-    },
+    enqueue: enqueueTelegram,
     readRun: (runId) => readRunSnapshot(sql, runId),
     delivery,
     isStopped: () => abort.signal.aborted,
     sleep: (ms) => sleepFor(ms, abort.signal),
     now: () => Date.now(),
-    track: (task) => {
-      follows.add(task);
-      void task.finally(() => {
-        follows.delete(task);
-      });
-    },
+    track,
+    rememberBusy: (message) => saveDialogMessage(sql, message),
+    hasPendingBuffer: (id, chatId) => hasPendingDialog(sql, id, chatId),
+    findExistingRun: (id, key) => findExistingRun(sql, id, key),
+    prepareDelivery: (run) => prepareRunDelivery(sql, run),
+    releaseBuffered: (chatId) => releaseChat(sql, enqueueTelegram, agentId, chatId),
+    followBridge,
   });
+  track(pumpBufferedDialogs(sql, enqueueTelegram, agentId, followBridge, abort.signal));
 
   const shutdown = (signal: "SIGINT" | "SIGTERM"): void => {
     if (stopping) {
@@ -133,6 +159,51 @@ async function serve(
       await endPool();
     }
   }
+}
+
+/**
+ * Память follow после рестарта пустая.
+ * Раз в интервал опроса ставится одно буферное сообщение, если чат уже свободен.
+ * Это не крон: тот же процесс Telegram и тот же интервал опроса запуска.
+ */
+async function pumpBufferedDialogs(
+  sql: Sql,
+  enqueue: TelegramEnqueue,
+  agentId: string,
+  bridge: FollowBridge,
+  signal: AbortSignal,
+): Promise<void> {
+  while (!signal.aborted) {
+    try {
+      const released = await releaseReadyDialogs(sql, enqueue, agentId);
+      for (const item of released) {
+        if (signal.aborted) {
+          return;
+        }
+        bridge.follow(item.runId, item.chatId);
+      }
+    } catch (error) {
+      logger.error({ err: error }, "telegram buffer pump failed");
+    }
+    if (signal.aborted) {
+      return;
+    }
+    await sleepFor(POLL_INTERVAL_MS, signal);
+  }
+}
+
+async function releaseChat(
+  sql: Sql,
+  enqueue: TelegramEnqueue,
+  agentId: string,
+  chatId: string,
+): Promise<string | null> {
+  const parsed = parseDecimalChatId(chatId);
+  if (parsed === null) {
+    return null;
+  }
+  const released = await releaseNextBuffered(sql, enqueue, agentId, parsed);
+  return released === null ? null : released.runId;
 }
 
 /** Срок опроса, не идентификатор. Abort обрывает сон на SIGTERM, не помечая запуск succeeded. */

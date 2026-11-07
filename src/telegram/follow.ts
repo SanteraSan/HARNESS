@@ -1,5 +1,6 @@
 import { logger } from "../config.js";
 import { POLL_INTERVAL_MS, POLL_LIMIT_MS, pollStep, type RunSnapshot } from "./decide.js";
+import type { DeliveryPreparation } from "./delivery.js";
 import { TelegramError } from "./errors.js";
 
 export interface DeliveryMemory {
@@ -13,13 +14,19 @@ export interface FollowDeps {
   now: () => number;
   isStopped: () => boolean;
   delivery: DeliveryMemory;
+  /**
+   * Устойчивая отметка. Нет функции — остаётся множество в памяти процесса,
+   * его хватает только до рестарта.
+   */
+  prepareDelivery?: (run: RunSnapshot) => Promise<DeliveryPreparation>;
+  /** После конечного статуса: поставить одно сообщение из буфера этого чата. */
+  onSettled?: (run: RunSnapshot) => Promise<void>;
 }
 
 /**
  * Читает один запуск короткими запросами и отпускает соединение на время сна.
  * Модель этот процесс не вызывает.
- * Id итога записывается до send: повторный опрос того же запуска исходящего не даёт.
- * Отметка доставки в базу не пишется.
+ * prepareDelivery пишет отметку до send. Повтор того же итога текст не готовит.
  */
 export async function followRun(runId: string, chatId: string, deps: FollowDeps): Promise<void> {
   const started = deps.now();
@@ -47,6 +54,27 @@ export async function followRun(runId: string, chatId: string, deps: FollowDeps)
       return;
     }
 
+    if (deps.prepareDelivery !== undefined) {
+      if (deps.delivery.sent.has(run.id)) {
+        return;
+      }
+      const prepared = await deps.prepareDelivery(run);
+      if (!prepared.pending) {
+        const next = new Set(deps.delivery.sent);
+        next.add(run.id);
+        deps.delivery.sent = next;
+        if (prepared.text !== null) {
+          try {
+            await deps.send(chatId, prepared.text);
+          } catch (error) {
+            logger.error({ err: error, run_id: runId }, "telegram send failed");
+          }
+        }
+        await settle(run, deps);
+        return;
+      }
+    }
+
     const step = pollStep(run, deps.delivery.sent, deps.now() - started);
     if (step.text !== null) {
       deps.delivery.sent = step.delivered;
@@ -55,6 +83,7 @@ export async function followRun(runId: string, chatId: string, deps: FollowDeps)
       } catch (error) {
         logger.error({ err: error, run_id: runId }, "telegram send failed");
       }
+      await settle(run, deps);
       return;
     }
 
@@ -63,5 +92,16 @@ export async function followRun(runId: string, chatId: string, deps: FollowDeps)
       return;
     }
     await deps.sleep(POLL_INTERVAL_MS);
+  }
+}
+
+async function settle(run: RunSnapshot, deps: FollowDeps): Promise<void> {
+  if (deps.onSettled === undefined) {
+    return;
+  }
+  try {
+    await deps.onSettled(run);
+  } catch (error) {
+    logger.error({ err: error, run_id: run.id }, "telegram buffer release failed");
   }
 }

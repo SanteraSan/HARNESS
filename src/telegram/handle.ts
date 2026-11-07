@@ -1,5 +1,16 @@
+import { logger } from "../config.js";
 import type { EnqueueInput } from "../contracts/types.js";
-import { decideUpdate, replyForEnqueue, type TelegramUpdateView } from "./decide.js";
+import type { DialogMessage } from "./buffer.js";
+import {
+  BUFFER_BEHIND_TEXT,
+  decideUpdate,
+  replyForBuffered,
+  replyForEnqueue,
+  type TelegramUpdateView,
+} from "./decide.js";
+
+/** M1 знает один арендатор. Постановка Telegram всегда source = telegram. */
+const LOCAL_TENANT = "local";
 
 export interface TelegramEnqueueResult {
   runId: string;
@@ -12,14 +23,18 @@ export interface HandleResult {
   text: string | null;
   followRunId: string | null;
   chatId: string | null;
+  /**
+   * Буфер уже держал хвост, а чат мог освободиться.
+   * Процесс ставит самое старое сообщение, не текущее.
+   */
+  wakeBuffer: boolean;
 }
 
-/** M1 знает один арендатор. Постановка Telegram всегда source = telegram. */
-const LOCAL_TENANT = "local";
-
 /**
- * Чистая ветка решает отказ, просьбу прислать текст или параметры enqueue.
- * Очередь вызывается только в ветке enqueue. Модель отсюда не вызывается.
+ * Ветка решает отказ, просьбу прислать текст или параметры enqueue.
+ * Очередь вызывается в ветке enqueue. Модель отсюда не вызывается.
+ * rememberBusy есть только у бота. Без него фраза прежняя: живой запуск и то, что новый не создан.
+ * HTTP в этот модуль не заходит и по-прежнему получает 409 dialog_busy.
  */
 export async function handleTelegramUpdate(
   update: TelegramUpdateView,
@@ -27,14 +42,41 @@ export async function handleTelegramUpdate(
     allowedUserIds: readonly string[];
     agentId: string;
     enqueue: TelegramEnqueue;
+    rememberBusy?: (message: DialogMessage) => Promise<void>;
+    hasPendingBuffer?: (agentId: string, chatId: bigint) => Promise<boolean>;
+    findExistingRun?: (agentId: string, idempotencyKey: string) => Promise<string | null>;
   },
 ): Promise<HandleResult> {
   const decision = decideUpdate(update, options.allowedUserIds, options.agentId);
   if (decision.kind === "ignore") {
-    return { text: null, followRunId: null, chatId: null };
+    return { text: null, followRunId: null, chatId: null, wakeBuffer: false };
   }
   if (decision.kind === "deny" || decision.kind === "need_text") {
-    return { text: decision.text, followRunId: null, chatId: null };
+    return { text: decision.text, followRunId: null, chatId: null, wakeBuffer: false };
+  }
+
+  const remembered = options.rememberBusy;
+  const pending = options.hasPendingBuffer;
+  const existingRun = options.findExistingRun;
+  if (remembered !== undefined && pending !== undefined && existingRun !== undefined) {
+    const existingId = await existingRun(options.agentId, decision.idempotencyKey);
+    if (existingId !== null) {
+      return {
+        text: replyForEnqueue({ runId: existingId, reason: "replay" }),
+        followRunId: existingId,
+        chatId: update.chatId,
+        wakeBuffer: false,
+      };
+    }
+    if (await pending(options.agentId, decision.chatId)) {
+      await remembered(busyMessage(decision, options.agentId));
+      return {
+        text: BUFFER_BEHIND_TEXT,
+        followRunId: null,
+        chatId: update.chatId,
+        wakeBuffer: true,
+      };
+    }
   }
 
   const queued = await options.enqueue({
@@ -45,9 +87,33 @@ export async function handleTelegramUpdate(
     message: decision.message,
     chatId: decision.chatId,
   });
+  if (queued.reason === "dialog_busy" && remembered !== undefined) {
+    await remembered(busyMessage(decision, options.agentId));
+    logger.info({ run_id: queued.runId }, "telegram message buffered");
+    return {
+      text: replyForBuffered(queued.runId),
+      followRunId: queued.runId,
+      chatId: update.chatId,
+      wakeBuffer: false,
+    };
+  }
   return {
     text: replyForEnqueue(queued),
     followRunId: queued.runId,
     chatId: update.chatId,
+    wakeBuffer: false,
+  };
+}
+
+function busyMessage(
+  decision: { idempotencyKey: string; message: string; chatId: bigint },
+  agentId: string,
+): DialogMessage {
+  return {
+    tenantId: LOCAL_TENANT,
+    agentId,
+    chatId: decision.chatId,
+    idempotencyKey: decision.idempotencyKey,
+    message: decision.message,
   };
 }
