@@ -67,7 +67,7 @@ todos:
     status: pending
   - id: m3-p5
     content: "M3-P5 Политика только внешние"
-    status: in_progress
+    status: done
 isProject: false
 ---
 
@@ -819,7 +819,7 @@ M2-4   P6 после P2, P3, P4, P5
 
 ### M3-P5. Только внешние
 
-- Волна: M3-2. Зависит от: M2-P6 `done`. Статус: `in_progress`.
+- Волна: M3-2. Зависит от: M2-P6 `done`. Статус: `done`.
 - Пути: `seed/external_only.sql`, `test/routing/external-only.test.ts`.
 - Сделать: набор `route_rules` без локального алиаса. Код локального раннера остаётся. Тесты M1 продолжают идти на фейковой модели.
 - Тесты: при этом наборе `resolveModel` не возвращает локальный алиас; `npm test` пакета M1 остаётся зелёным.
