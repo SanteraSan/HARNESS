@@ -44,6 +44,7 @@ describe("migration 001", () => {
       "003_tasks.sql",
       "004_cron.sql",
       "005_dialog_buffer.sql",
+      "006_connector_secrets.sql",
     ]);
 
     const agents = await sql<{ count: number }[]>`select count(*)::int as count from agents`;
