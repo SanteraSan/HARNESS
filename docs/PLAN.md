@@ -55,7 +55,7 @@ todos:
     status: done
   - id: m3-p1
     content: "M3-P1 ClaudeSdkRunner по provider из resolveModel"
-    status: in_progress
+    status: pending
   - id: m3-p2
     content: "M3-P2 Контейнер на запуск"
     status: pending
@@ -784,7 +784,7 @@ M2-4   P6 после P2, P3, P4, P5
 
 ### M3-P1. ClaudeSdkRunner
 
-- Волна: M3-0. Зависит от: M2-P6 `done`. Статус: `in_progress`.
+- Волна: M3-0. Зависит от: M2-P6 `done`. Статус: `pending`.
 - Пути: `src/runner/claude-sdk.ts`, выбор реализации в `src/worker.ts`, `test/runner/claude-sdk.test.ts`.
 - Сделать: `ClaudeSdkRunner` реализует тот же `Runner`. Воркер выбирает реализацию по `provider`, который вернул `resolveModel`. SDK не импортируется из очереди, API и Telegram. Зависимость SDK в M1 закрытом списке запрещена: пакет останавливается `blocked`, если её нет в плане отдельным разрешением оркестратора. До этого разрешения тесты идут на подставном объекте с тем же интерфейсом, без установки SDK.
 - Тесты: `provider = local` не создаёт SDK-раннер; `provider = external` выбирает вторую реализацию; очередь, API и Telegram этот модуль не импортируют.
