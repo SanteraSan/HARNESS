@@ -93,7 +93,7 @@ curl -s 127.0.0.1:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_CO
 ollama ps
 ```
 
-После прогрева `ollama ps` показывает профиль `agent` и `fast`. Код выхода `warmup.sh` 0 значит, что обе модели на GPU.
+После прогрева `ollama ps` показывает `qwen3.8:latest`. На 16 ГБ код выхода `warmup.sh` 2 ожидаем: модель загружена, но не целиком на GPU. Код 0 у этого профиля на этой карте не обещается.
 
 ## Процессы HARNESS
 
