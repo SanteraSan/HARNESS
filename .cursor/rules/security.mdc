@@ -1,11 +1,11 @@
 ---
-description: Безопасность HARNESS по аудиту MOEX, OWASP Node.js и плану продукта
+description: Безопасность HARNESS по OWASP Node.js и плану продукта
 alwaysApply: true
 ---
 
 # Безопасность
 
-Основа: правила ИБ MOEX Insight (проверки пути, секреты, shell, ReDoS, криптостойкие id), [OWASP Node.js Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Nodejs_Security_Cheat_Sheet.html) и [Security Best Practices Node.js](https://nodejs.org/learn/getting-started/security-best-practices). Пункты Electron оттуда не переносятся.
+Основа: проверки пути, секреты, shell, ReDoS, криптостойкие id, [OWASP Node.js Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Nodejs_Security_Cheat_Sheet.html) и [Security Best Practices Node.js](https://nodejs.org/learn/getting-started/security-best-practices). Пункты Electron оттуда не переносятся.
 
 ## Секреты и логи
 
