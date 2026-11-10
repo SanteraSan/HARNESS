@@ -7,7 +7,8 @@ export const MESSAGE_LIMIT = 8000;
 
 /** Опрос своего запуска. Срок — часы процесса, не аренда воркера. */
 export const POLL_INTERVAL_MS = 2_000;
-export const POLL_LIMIT_MS = 10 * 60 * 1000;
+/** Дольше таймаута воркера, чтобы итог успел уйти в чат. */
+export const POLL_LIMIT_MS = 11 * 60 * 1000;
 
 const DENY_TEXT = "Нет доступа.";
 const NEED_TEXT = "В этом срезе принимается только текст.";
@@ -200,7 +201,7 @@ export interface PollStep {
   keepWaiting: boolean;
 }
 
-/** Конечный статус или десять минут ожидания останавливают опрос. */
+/** Конечный статус или предел ожидания останавливают опрос. */
 export function pollStep(
   run: RunSnapshot,
   delivered: ReadonlySet<string>,
