@@ -25,6 +25,7 @@ function userInput(overrides: Partial<ModelInput> = {}): ModelInput {
   return {
     model: "agent",
     temperature: 0,
+    maxTokens: 4096,
     messages: [{ role: "user", content: "привет", toolCallId: null, toolCalls: null }],
     tools: [],
     ...overrides,
@@ -36,6 +37,7 @@ describe("LiteLLMChatModel", () => {
     const input: ModelInput = {
       model: "agent",
       temperature: 0,
+      maxTokens: 4096,
       tools: [
         {
           name: "read_file",
@@ -79,6 +81,7 @@ describe("LiteLLMChatModel", () => {
         expect(request?.body).toEqual({
           model: "agent",
           temperature: 0,
+          max_tokens: 4096,
           messages: [
             { role: "system", content: "Ты клерк" },
             { role: "user", content: "прочитай note.txt" },
@@ -375,6 +378,48 @@ describe("LiteLLMChatModel", () => {
       },
     );
   });
+
+  it("должен отказать на предел токенов вне диапазона и не открывать сокет", async () => {
+    const model = new LiteLLMChatModel({ baseUrl: "http://127.0.0.1:9/v1", apiKey });
+    const caught = await capture(() => model.complete(userInput({ maxTokens: 0 })));
+    expect(caught).toBeInstanceOf(ModelError);
+    if (!(caught instanceof ModelError)) {
+      return;
+    }
+    expect(caught.code).toBe("model_request_invalid");
+  });
+
+  it("должен закрыть сокет по таймауту", async () => {
+    let closed = false;
+    const server = createServer((req, res) => {
+      req.on("close", () => {
+        closed = true;
+        res.end();
+      });
+    });
+    server.requestTimeout = 0;
+    await listen(server);
+    try {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        throw new Error("test server address");
+      }
+      const model = new LiteLLMChatModel({
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey,
+        timeoutMs: 200,
+      });
+      const caught = await capture(() => model.complete(userInput()));
+      expect(caught).toBeInstanceOf(ModelError);
+      if (!(caught instanceof ModelError)) {
+        return;
+      }
+      expect(caught.code).toBe("model_timeout");
+      await waitForClose(() => closed);
+    } finally {
+      await closeServer(server);
+    }
+  });
 });
 
 function textCompletion(content: string): unknown {
@@ -390,6 +435,18 @@ function textCompletion(content: string): unknown {
     ],
     usage: { prompt_tokens: 11, completion_tokens: 2, total_tokens: 13 },
   };
+}
+
+async function waitForClose(isClosed: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (!isClosed()) {
+    if (Date.now() > deadline) {
+      throw new Error("socket stayed open after timeout");
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, 10);
+    });
+  }
 }
 
 async function capture(run: () => Promise<unknown>): Promise<unknown> {

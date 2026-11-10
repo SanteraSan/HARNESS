@@ -38,6 +38,8 @@ export interface AgentRecord {
   provider: Provider;
   maxSteps: number;
   toolAllowlist: readonly string[];
+  /** Сколько токенов модель может написать за один вызов. */
+  maxCompletionTokens: number;
   createdAt: Date;
 }
 
@@ -103,6 +105,8 @@ export interface ModelInput {
   messages: readonly ModelMessage[];
   tools: readonly ModelToolSpec[];
   temperature: 0;
+  /** Предел этого вызова. Без него шлюз не останавливает генерацию. */
+  maxTokens: number;
 }
 
 export interface ModelOutput {

@@ -398,6 +398,7 @@ function snapshotInput(input: ModelInput): ModelInput {
   return {
     model: input.model,
     temperature: input.temperature,
+    maxTokens: input.maxTokens,
     tools: input.tools.map((tool) => ({ ...tool })),
     messages: input.messages.map(snapshotMessage),
   };

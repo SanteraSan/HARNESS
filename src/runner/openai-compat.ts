@@ -38,6 +38,8 @@ export interface RunnerAgent {
   provider: Provider;
   maxSteps: number;
   toolAllowlist: readonly string[];
+  /** Предел одного ответа. Берётся со строки агента. */
+  maxCompletionTokens: number;
 }
 
 /**
@@ -146,6 +148,7 @@ export class OpenAICompatRunner implements Runner {
         temperature: 0,
         messages,
         tools,
+        maxTokens: agent.maxCompletionTokens,
       });
       totals.promptTokens = addTokens(totals.promptTokens, output.promptTokens);
       totals.completionTokens = addTokens(totals.completionTokens, output.completionTokens);

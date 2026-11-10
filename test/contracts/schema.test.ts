@@ -46,6 +46,7 @@ describe("migration 001", () => {
       "005_dialog_buffer.sql",
       "006_connector_secrets.sql",
       "007_chat_model.sql",
+      "008_completion_limit.sql",
     ]);
 
     const agents = await sql<{ count: number }[]>`select count(*)::int as count from agents`;
@@ -131,6 +132,7 @@ describe("migration 001", () => {
         model_alias: string;
         provider: string;
         max_steps: number;
+        max_completion_tokens: number;
         tool_allowlist: string[];
         prompt_length: number;
       }[]
@@ -142,6 +144,7 @@ describe("migration 001", () => {
         model_alias,
         provider,
         max_steps,
+        max_completion_tokens,
         tool_allowlist,
         char_length(system_prompt)::int as prompt_length
       from agents
@@ -153,8 +156,37 @@ describe("migration 001", () => {
     expect(agent?.model_alias).toBe("agent");
     expect(agent?.provider).toBe("local");
     expect(agent?.max_steps).toBe(8);
+    expect(agent?.max_completion_tokens).toBe(4096);
     expect(agent?.tool_allowlist).toEqual(["read_file", "list_dir"]);
     expect(agent?.prompt_length).toBeGreaterThan(0);
     expect(agent?.prompt_length).toBeLessThanOrEqual(800);
+  });
+
+  it("должен отвергнуть предел ответа вне 1..8192", async () => {
+    await expect(sql`
+      insert into agents (
+        id,
+        tenant_id,
+        slug,
+        display_name,
+        system_prompt,
+        model_alias,
+        provider,
+        max_steps,
+        tool_allowlist,
+        max_completion_tokens
+      ) values (
+        '00000000-0000-4000-8000-0000000000aa',
+        'local',
+        'limit-zero',
+        'Предел',
+        'короткий',
+        'agent',
+        'local',
+        8,
+        array['read_file']::text[],
+        0
+      )
+    `).rejects.toThrow();
   });
 });

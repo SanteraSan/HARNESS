@@ -559,6 +559,7 @@ async function runScenario(scenario: Scenario): Promise<ScenarioResult> {
   for (const input of inputs) {
     expect(input.temperature).toBe(0);
     expect(input.model).toBe(agent.modelAlias);
+    expect(input.maxTokens).toBe(agent.maxCompletionTokens);
   }
 
   return { claimed, steps, finishes, inputs, events };
@@ -572,6 +573,7 @@ function runnerAgent(overrides: Partial<RunnerAgent> = {}): RunnerAgent {
     provider: "local",
     maxSteps: 8,
     toolAllowlist: ["list_dir", "read_file"],
+    maxCompletionTokens: 4096,
     ...overrides,
   };
 }

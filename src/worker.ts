@@ -16,6 +16,7 @@ import type {
 import { createSql, type Sql } from "./db/client.js";
 import { createDelegationTools } from "./delegation/index.js";
 import { createRunJournal, type RunJournal } from "./journal/index.js";
+import { MAX_COMPLETION_TOKENS } from "./model/limits.js";
 import { LiteLLMChatModel, collectSecrets } from "./model/index.js";
 import { createRunQueue } from "./queue/index.js";
 import { ClaudeSdkRunner, unavailableClaudeSdkClient } from "./runner/claude-sdk.js";
@@ -104,7 +105,8 @@ export async function runWorker(options: WorkerLoopOptions): Promise<void> {
  */
 export async function loadRunnerAgent(sql: Sql, agentId: string): Promise<RunnerAgent> {
   const rows = await sql<Record<string, unknown>[]>`
-    select id, system_prompt, model_alias, provider, max_steps, tool_allowlist
+    select id, system_prompt, model_alias, provider, max_steps, tool_allowlist,
+           max_completion_tokens
     from agents
     where id = ${agentId}
   `;
@@ -127,6 +129,7 @@ export async function loadRunnerAgent(sql: Sql, agentId: string): Promise<Runner
     provider: requireProvider(row.provider),
     maxSteps: requireMaxSteps(row.max_steps),
     toolAllowlist: requireStringArray(row.tool_allowlist),
+    maxCompletionTokens: requireCompletionTokens(row.max_completion_tokens),
   };
 }
 
@@ -478,6 +481,18 @@ function requireMaxSteps(value: unknown): number {
   return value;
 }
 
+function requireCompletionTokens(value: unknown): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > MAX_COMPLETION_TOKENS
+  ) {
+    throw new WorkerError("invalid_agent", "agent completion limit is invalid");
+  }
+  return value;
+}
+
 function requireStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) {
     throw new WorkerError("invalid_agent", "agent allowlist is invalid");
@@ -492,8 +507,11 @@ function requireStringArray(value: unknown): string[] {
   return names;
 }
 
-/** Ход через LiteLLM в процессе воркера. Не из окружения: у класса по умолчанию 60 секунд. */
-export const WORKER_MODEL_TIMEOUT_MS = 180_000;
+/**
+ * Ход через LiteLLM в процессе воркера. Не из окружения: у класса по умолчанию 60 секунд.
+ * Десять минут: внешняя модель может отвечать дольше трёх, и обрыв прячет уже готовый текст.
+ */
+export const WORKER_MODEL_TIMEOUT_MS = 600_000;
 
 export function createWorkerChatModel(options: {
   baseUrl: string;

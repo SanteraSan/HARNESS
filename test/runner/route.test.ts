@@ -132,6 +132,7 @@ function scripted(outputs: readonly ModelOutput[]): ChatModel & { inputs: ModelI
       inputs.push({
         model: input.model,
         temperature: input.temperature,
+        maxTokens: input.maxTokens,
         tools: input.tools.map((tool) => ({ ...tool })),
         messages: input.messages.map((message) => ({
           role: message.role,

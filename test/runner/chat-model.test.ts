@@ -150,8 +150,8 @@ describe("chat model run", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("должен передать клиенту LiteLLM таймаут 180 секунд и не брать его из окружения", async () => {
-    expect(WORKER_MODEL_TIMEOUT_MS).toBe(180_000);
+  it("должен передать клиенту LiteLLM таймаут 10 минут и не брать его из окружения", async () => {
+    expect(WORKER_MODEL_TIMEOUT_MS).toBe(600_000);
     const workerSource = await readSource(
       fileURLToPath(new URL("../../src/worker.ts", import.meta.url)),
     );
@@ -166,7 +166,7 @@ describe("chat model run", () => {
         secrets: [],
       }).complete(ping("agent")),
     );
-    expect(workerTimeouts).toEqual([180_000]);
+    expect(workerTimeouts).toEqual([600_000]);
 
     const defaultTimeouts = await captureTimeouts(() =>
       new LiteLLMChatModel({
@@ -190,6 +190,7 @@ function ping(model: string): ModelInput {
   return {
     model,
     temperature: 0,
+    maxTokens: 4096,
     messages: [{ role: "user", content: "ping", toolCallId: null, toolCalls: null }],
     tools: [],
   };
@@ -225,6 +226,7 @@ function scripted(output: ModelOutput): ScriptedModel {
       inputs.push({
         model: input.model,
         temperature: input.temperature,
+        maxTokens: input.maxTokens,
         messages: input.messages.map((message) => ({
           role: message.role,
           content: message.content,

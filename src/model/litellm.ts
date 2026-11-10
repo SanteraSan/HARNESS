@@ -1,3 +1,6 @@
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+
 import { z } from "zod";
 
 import type {
@@ -8,6 +11,7 @@ import type {
   ModelToolSpec,
 } from "../contracts/index.js";
 
+import { MAX_COMPLETION_TOKENS } from "./limits.js";
 import { containsListedSecret, redact } from "./redact.js";
 
 /** Ответ длиннее этого не отдаётся в JSON.parse. */
@@ -85,6 +89,7 @@ interface WireTool {
 interface WireRequest {
   model: string;
   temperature: 0;
+  max_tokens: number;
   messages: WireMessage[];
   tools: WireTool[];
 }
@@ -144,18 +149,18 @@ export class LiteLLMChatModel implements ChatModel {
 
     let response: Response;
     try {
-      response = await fetch(this.completionsUrl, {
-        method: "POST",
-        headers: {
+      // fetch здесь нельзя: undici обрывает ожидание заголовков через 300 секунд,
+      // раньше нашего сигнала. Медленный ответ Gemini тогда теряется.
+      response = await postJson(
+        this.completionsUrl,
+        serialized,
+        {
           authorization: `Bearer ${this.apiKey}`,
           "content-type": "application/json",
           accept: "application/json",
         },
-        body: serialized,
-        // Ключ остаётся на этом хосте: редирект с заголовком bearer не выполняем.
-        redirect: "error",
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
+        this.timeoutMs,
+      );
     } catch (error) {
       throw transportError(error, this.secrets);
     }
@@ -219,9 +224,18 @@ function buildPayload(input: ModelInput): WireRequest {
   return {
     model: input.model,
     temperature: 0,
+    max_tokens: requireCompletionTokens(input.maxTokens),
     messages: input.messages.map(toWireMessage),
     tools: input.tools.map(toWireTool),
   };
+}
+
+/** Вне диапазона миграции запрос не уходит: иначе шлюз снова пишет без предела. */
+function requireCompletionTokens(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_COMPLETION_TOKENS) {
+    throw new ModelError("model_request_invalid", "model request invalid");
+  }
+  return value;
 }
 
 function toWireMessage(message: ModelMessage): WireMessage {
@@ -327,11 +341,92 @@ function finiteNumber(value: unknown): number | null {
   return value;
 }
 
+/**
+ * Прямой POST без следования редиректу: заголовок bearer не уходит на другой хост.
+ * Тишина сокета дольше timeoutMs — TimeoutError, как у AbortSignal.timeout.
+ */
+function postJson(
+  url: URL,
+  body: string,
+  headers: Record<string, string>,
+  timeoutMs: number,
+): Promise<Response> {
+  const signal = AbortSignal.timeout(timeoutMs);
+  const request = url.protocol === "https:" ? httpsRequest : httpRequest;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (error: unknown): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(error);
+    };
+    const succeed = (response: Response): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(response);
+    };
+
+    const req = request(
+      url,
+      {
+        method: "POST",
+        headers: {
+          ...headers,
+          "content-length": String(Buffer.byteLength(body)),
+        },
+        signal,
+      },
+      (incoming) => {
+        // Редирект не читаем и не повторяем: цель могла бы получить bearer.
+        if (isRedirect(incoming.statusCode)) {
+          incoming.resume();
+          fail(new Error("redirect refused"));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        incoming.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
+        incoming.on("end", () => {
+          const payload = Buffer.concat(chunks);
+          succeed(new Response(payload, { status: incoming.statusCode ?? 0 }));
+        });
+        incoming.on("error", fail);
+      },
+    );
+    req.setTimeout(timeoutMs, () => {
+      const error = new Error("model timeout");
+      error.name = "TimeoutError";
+      req.destroy(error);
+    });
+    req.on("error", fail);
+    req.end(body);
+  });
+}
+
+function isRedirect(status: number | undefined): boolean {
+  return status !== undefined && status >= 300 && status < 400;
+}
+
+function isTimeout(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  if (error.name === "TimeoutError") {
+    return true;
+  }
+  return error.cause instanceof Error && error.cause.name === "TimeoutError";
+}
+
 function transportError(error: unknown, secrets: readonly string[]): ModelError {
   if (error instanceof ModelError) {
     return error;
   }
-  if (error instanceof Error && error.name === "TimeoutError") {
+  if (isTimeout(error)) {
     return new ModelError("model_timeout", "model timeout");
   }
   const detail = error instanceof Error ? error.message : "model transport failed";
