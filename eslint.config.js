@@ -25,4 +25,8 @@ export default tseslint.config(
       "security/detect-unsafe-regex": "error",
     },
   },
+  {
+    files: [".husky/**/*.mjs"],
+    extends: [tseslint.configs.disableTypeChecked],
+  },
 );
