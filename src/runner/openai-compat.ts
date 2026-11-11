@@ -387,12 +387,12 @@ export class OpenAICompatRunner implements Runner {
   }
 
   /**
-   * Сначала подготовка текста, потом redact.
-   * Скрытый символ внутри секрета иначе пережил бы маску и попал бы в следующий ход.
+   * Скрытые символы, затем redact на полном тексте, затем 8000 кодпоинтов.
+   * Обрезка до маски оставила бы префикс секрета в следующем ходе и в шаге.
    * Содержимое роли tool в interpretModelOutput не передаётся.
    */
   private toolData(text: string): string {
-    return this.mask(prepareToolResultForModel({ source: "tool", text }).text);
+    return prepareToolResultForModel({ source: "tool", text }, (value) => this.mask(value)).text;
   }
 
   private async appendToolResult(
