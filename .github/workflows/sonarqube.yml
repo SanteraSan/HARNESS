@@ -1,0 +1,49 @@
+# SonarQube Community Build 26.11 не анализирует несколько веток и не украшает pull request:
+# https://docs.sonarsource.com/sonarqube-community-build/feature-comparison-table
+# https://docs.sonarsource.com/sonarqube-community-build/devops-platform-integration/github-integration/adding-analysis-to-github-actions-workflow
+# Поэтому dev, stage и prod — три проекта. События pull_request и pull_request_target не используются:
+# задание с форка не должно попасть на self-hosted раннер.
+name: sonarqube
+
+on:
+  push:
+    branches:
+      - dev
+      - stage
+      - prod
+
+permissions:
+  contents: read
+
+jobs:
+  sonarqube:
+    runs-on:
+      - self-hosted
+      - harness-sonar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Проверка ветки
+        run: |
+          case "$GITHUB_REF_NAME" in
+            dev|stage|prod) ;;
+            *)
+              echo "Ветка вне dev, stage, prod" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+          # Сканер в GitHub Actions сам подставляет sonar.branch.name.
+          # Community Build такой параметр отклоняет. Шаг анализирует код как
+          # единственную ветку проекта harness-<ветка>, без украшения pull request.
+          GITHUB_ACTIONS: "false"
+        with:
+          args: -Dsonar.projectKey=harness-${{ github.ref_name }} -Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=300
