@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "harness.tool.v1.response.schema.json",
+  "title": "harness.tool.v1 response",
+  "type": "object",
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "required": ["contract", "ok", "truncated", "duration_ms", "blobs"],
+  "properties": {
+    "contract": { "const": "harness.tool.v1" },
+    "ok": { "type": "boolean" },
+    "truncated": { "type": "boolean" },
+    "duration_ms": { "type": "integer", "minimum": 0, "maximum": 600000 },
+    "blobs": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 36,
+        "maxLength": 36,
+        "description": "uuid в нижнем регистре"
+      }
+    },
+    "text": { "type": "string", "maxLength": 65536 },
+    "error": { "type": "string", "minLength": 1, "maxLength": 200 }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "ok": { "const": true } },
+        "required": ["ok"]
+      },
+      "then": {
+        "required": ["text"],
+        "not": { "required": ["error"] }
+      },
+      "else": {
+        "required": ["error"],
+        "not": { "required": ["text"] },
+        "properties": {
+          "blobs": { "maxItems": 0 }
+        }
+      }
+    }
+  ]
+}

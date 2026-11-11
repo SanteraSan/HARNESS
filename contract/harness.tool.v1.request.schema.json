@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "harness.tool.v1.request.schema.json",
+  "title": "harness.tool.v1 request",
+  "type": "object",
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "required": ["contract", "run_id", "tool_call_id", "agent_id", "name", "arguments"],
+  "properties": {
+    "contract": { "const": "harness.tool.v1" },
+    "run_id": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "description": "uuid в нижнем регистре"
+    },
+    "tool_call_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "1..128 символов из A-Z, a-z, 0-9, _ и -"
+    },
+    "agent_id": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "description": "uuid в нижнем регистре"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Один сегмент имени. Не точка и не две точки."
+    },
+    "arguments": {
+      "type": "object",
+      "description": "Объект. После снятия idempotency_key его проверяет схема инструмента, не этот конверт."
+    }
+  }
+}

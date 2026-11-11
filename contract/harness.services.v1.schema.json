@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "harness.services.v1.schema.json",
+  "title": "harness.services.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "required": ["contract", "services"],
+  "properties": {
+    "contract": { "const": "harness.services.v1" },
+    "services": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/service" }
+    }
+  },
+  "$defs": {
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "base_url", "tools"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Начинается со строчной латинской буквы. Дальше строчные, цифры, _ и -."
+        },
+        "base_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Литерал IPv4 без userinfo, query и fragment. Путь пустой или /. http только для 127.0.0.1. Иной частный адрес — https и tls_fingerprint256. 0.0.0.0, имя DNS и IPv6 не подходят."
+        },
+        "tls_fingerprint256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "description": "64 шестнадцатеричных символа в нижнем регистре. Пин сертификата, не секрет."
+        },
+        "tools": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/tool" }
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "effect", "description", "accepts_blobs", "parameters"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "effect": { "enum": ["read", "write"] },
+        "description": { "type": "string", "maxLength": 500 },
+        "accepts_blobs": { "type": "boolean" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "unevaluatedProperties": false,
+      "required": ["type"],
+      "description": "Файл оператора принимает только type, properties, required, additionalProperties, maxLength, minLength, enum, maxItems. pattern, $ref, $data, allOf и items файл бракуют. Хаб этот документ не компилирует.",
+      "properties": {
+        "type": { "enum": ["object", "string", "integer", "number", "boolean"] },
+        "additionalProperties": { "const": false },
+        "properties": { "type": "object" },
+        "required": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 64 }
+        },
+        "minLength": { "type": "integer", "minimum": 0, "maximum": 65536 },
+        "maxLength": { "type": "integer", "minimum": 0, "maximum": 65536 },
+        "enum": { "type": "array", "minItems": 1, "maxItems": 32 },
+        "maxItems": { "type": "integer", "minimum": 0, "maximum": 32 }
+      }
+    }
+  }
+}

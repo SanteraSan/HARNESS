@@ -1,0 +1,53 @@
+{
+  "contract": "harness.services.v1",
+  "services": [
+    {
+      "id": "files",
+      "base_url": "http://127.0.0.1/",
+      "tools": [
+        {
+          "name": "read_file",
+          "effect": "read",
+          "description": "Читает текстовый файл UTF-8 внутри рабочего каталога. Каталог, бинарные данные и путь снаружи корня — ошибка.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "maxLength": 4096 }
+            }
+          }
+        },
+        {
+          "name": "list_dir",
+          "effect": "read",
+          "description": "Показывает один уровень каталога: имя и признак каталога. Во вложенные каталоги не спускается.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "maxLength": 4096 }
+            }
+          }
+        },
+        {
+          "name": "record_note",
+          "effect": "write",
+          "description": "Записывает текстовый файл в каталог out. Повтор с тем же ключом идемпотентности возвращает первый результат и не создаёт второй файл.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "text"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+              "text": { "type": "string", "minLength": 1, "maxLength": 32768 }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
