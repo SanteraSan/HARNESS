@@ -6,6 +6,8 @@ import {
   BLOBS_MAX,
   DURATION_MS_MAX,
   ERROR_TEXT_MAX_CODE_POINTS,
+  JSON_BODY_LIMIT_BYTES,
+  RESPONSE_BODY_LIMIT_BYTES,
   RESPONSE_TEXT_MAX_CODE_POINTS,
   TOOL_CALL_ID_RE,
   TOOL_NAME_RE,
@@ -95,8 +97,9 @@ export function parseToolRequest(raw: string | Uint8Array): ParseResult<ToolRequ
   return parseWith(raw, toolRequestSchema, CONTRACT_VERSION);
 }
 
+/** Длинный text не отказ: в модель его готовит clipModelText, здесь только схема и потолок байтов. */
 export function parseToolResponse(raw: string | Uint8Array): ParseResult<ToolResponse> {
-  return parseWith(raw, toolResponseSchema, CONTRACT_VERSION);
+  return parseWith(raw, toolResponseSchema, CONTRACT_VERSION, RESPONSE_BODY_LIMIT_BYTES);
 }
 
 export function parseHttpError(raw: string | Uint8Array): ParseResult<ToolHttpError> {
@@ -115,8 +118,9 @@ function parseWith<T>(
   raw: string | Uint8Array,
   schema: z.ZodType<T>,
   version: string,
+  limitBytes = JSON_BODY_LIMIT_BYTES,
 ): ParseResult<T> {
-  const parsed = parseJsonBody(raw);
+  const parsed = parseJsonBody(raw, limitBytes);
   if (!parsed.ok) {
     return parsed;
   }

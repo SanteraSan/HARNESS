@@ -12,24 +12,28 @@
       "type": "string",
       "minLength": 36,
       "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "description": "uuid в нижнем регистре"
     },
     "tool_call_id": {
       "type": "string",
       "minLength": 1,
       "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]{1,128}$",
       "description": "1..128 символов из A-Z, a-z, 0-9, _ и -"
     },
     "agent_id": {
       "type": "string",
       "minLength": 36,
       "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "description": "uuid в нижнем регистре"
     },
     "name": {
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]{1,64}$",
       "description": "Один сегмент имени. Не точка и не две точки."
     },
     "arguments": {

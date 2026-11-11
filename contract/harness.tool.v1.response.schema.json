@@ -22,8 +22,18 @@
         "description": "uuid в нижнем регистре"
       }
     },
-    "text": { "type": "string", "maxLength": 65536 },
-    "error": { "type": "string", "minLength": 1, "maxLength": 200 }
+    "text": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "До 65536 кодпоинтов. В модель после разбора входит не больше 8000: это подготовка текста, не отказ ответа."
+    },
+    "error": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[^\\u0000-\\u001F\\u007F\\u0080-\\u009F]{1,400}$",
+      "description": "Без U+0000–U+001F, U+007F и U+0080–U+009F. Квантификатор 400 — два UTF-16 на кодпоинт, длину режет maxLength."
+    }
   },
   "allOf": [
     {

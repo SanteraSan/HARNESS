@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { isPlainObject, readOwn, scanData } from "./data.js";
+import { codePointLength, isPlainObject, readOwn, scanData } from "./data.js";
 import { issueReason } from "./envelope.js";
 import { DESCRIPTION_MAX, FINGERPRINT_RE, SERVICE_ID_RE, TOOL_NAME_RE } from "./limits.js";
 import { SERVICES_VERSION } from "./result.js";
@@ -296,6 +296,10 @@ function parametersAllowed(value: unknown, depth: number): boolean {
   if (typeof type !== "string" || !PARAMETER_TYPES.has(type)) {
     return false;
   }
+  // Корень parameters — object: arguments вызова тоже объект, строка не вызывается.
+  if (depth === 0 && type !== "object") {
+    return false;
+  }
   if (type === "object") {
     if (readOwn(value, "additionalProperties") !== false) {
       return false;
@@ -316,7 +320,7 @@ function parametersAllowed(value: unknown, depth: number): boolean {
   if (!lengthAllowed(value, type)) {
     return false;
   }
-  if (!enumAllowed(readOwn(value, "enum"))) {
+  if (!enumAllowed(readOwn(value, "enum"), type)) {
     return false;
   }
   return maxItemsAllowed(readOwn(value, "maxItems"));
@@ -352,8 +356,13 @@ function requiredAllowed(value: unknown, owner: object): boolean {
   if (!Array.isArray(value) || value.length > 32) {
     return false;
   }
+  const properties = readOwn(owner, "properties");
   for (const item of value) {
     if (typeof item !== "string" || item.length === 0 || item.length > 64) {
+      return false;
+    }
+    // Имени нет среди properties, а additionalProperties ложен: такого объекта не бывает.
+    if (!isPlainObject(properties) || !Object.hasOwn(properties, item)) {
       return false;
     }
   }
@@ -381,7 +390,7 @@ function lengthAllowed(value: object, type: string): boolean {
   return true;
 }
 
-function enumAllowed(value: unknown): boolean {
+function enumAllowed(value: unknown, type: string): boolean {
   if (value === undefined) {
     return true;
   }
@@ -389,21 +398,28 @@ function enumAllowed(value: unknown): boolean {
     return false;
   }
   for (const item of value) {
-    if (typeof item === "string") {
-      if (item.length > 64) {
-        return false;
-      }
-      continue;
+    if (!enumMemberMatchesType(item, type)) {
+      return false;
     }
-    if (typeof item === "boolean") {
-      continue;
-    }
-    if (typeof item === "number" && Number.isFinite(item)) {
-      continue;
-    }
-    return false;
   }
   return true;
+}
+
+/** Член enum должен сам удовлетворять type, иначе ни одно значение не подходит. */
+function enumMemberMatchesType(item: unknown, type: string): boolean {
+  if (type === "string") {
+    return typeof item === "string" && codePointLength(item) <= 64;
+  }
+  if (type === "boolean") {
+    return typeof item === "boolean";
+  }
+  if (type === "integer") {
+    return typeof item === "number" && Number.isInteger(item);
+  }
+  if (type === "number") {
+    return typeof item === "number" && Number.isFinite(item);
+  }
+  return false;
 }
 
 function maxItemsAllowed(value: unknown): boolean {

@@ -10,13 +10,19 @@ interface Cursor {
   index: number;
 }
 
-/** Повтор ключа в одном объекте — invalid_body ещё до хеша. Сканер не компилирует pattern схемы. */
-export function parseJsonBody(raw: string | Uint8Array): ParseResult<unknown> {
+/**
+ * Повтор ключа в одном объекте — invalid_body ещё до хеша. Сканер не компилирует pattern схемы.
+ * limitBytes задаёт вызывающий: у запроса 32 КиБ, у ответа потолок, в который входит text схемы.
+ */
+export function parseJsonBody(
+  raw: string | Uint8Array,
+  limitBytes = JSON_BODY_LIMIT_BYTES,
+): ParseResult<unknown> {
   const text = typeof raw === "string" ? raw : decodeUtf8(raw);
   if (text === null) {
     return { ok: false, reason: "invalid_body" };
   }
-  if (Buffer.byteLength(text, "utf8") > JSON_BODY_LIMIT_BYTES) {
+  if (Buffer.byteLength(text, "utf8") > limitBytes) {
     return { ok: false, reason: "payload_too_large" };
   }
   let value: unknown;
