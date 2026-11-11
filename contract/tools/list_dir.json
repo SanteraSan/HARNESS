@@ -1,0 +1,18 @@
+{
+  "name": "list_dir",
+  "effect": "read",
+  "description": "Показывает один уровень каталога: имя и признак каталога. Во вложенные каталоги не спускается.",
+  "accepts_blobs": false,
+  "call": {
+    "method": "POST",
+    "path": "/v1/tools/list_dir",
+    "idempotency": "optional"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "path": { "type": "string", "minLength": 1, "maxLength": 4096 }
+    }
+  }
+}
