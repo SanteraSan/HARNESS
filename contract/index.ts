@@ -17,19 +17,30 @@ export {
   BLOBS_MAX,
   DESCRIPTION_MAX,
   DURATION_MS_MAX,
+  ENV_NAME_RE,
   ERROR_TEXT_MAX_CODE_POINTS,
   JSON_BODY_LIMIT_BYTES,
   MODEL_TOOL_TEXT_CHARS,
   RECORD_NOTE_TEXT_MAX,
   RESPONSE_BODY_LIMIT_BYTES,
   RESPONSE_TEXT_MAX_CODE_POINTS,
+  TOOL_ERROR_CODES,
   TOOL_PATH_MAX,
+  TOOL_VERSION,
 } from "./limits.js";
-export { parseServicesManifest } from "./manifest.js";
+export type { ToolErrorCode } from "./limits.js";
+export {
+  AUTH_NONE_MESSAGE,
+  LOCALHOST_BASE_URL_MESSAGE,
+  UNKNOWN_TOOL_VERSION_MESSAGE,
+  duplicateModelNameMessage,
+  parseServicesManifest,
+} from "./manifest.js";
+export type { ServiceAuth, ServiceEntry, ServiceTool, ServicesManifest } from "./manifest.js";
 export { CONTRACT_REASONS, CONTRACT_VERSION, ContractError, SERVICES_VERSION } from "./result.js";
 export type { ContractReason, ParseResult } from "./result.js";
-export { selectToolsForModel } from "./select.js";
-export type { ListedTool } from "./select.js";
+export { selectServiceTool, selectToolsForModel } from "./select.js";
+export type { ListedTool, SelectedServiceTool } from "./select.js";
 export {
   CONTRACT_HEADER_NAME,
   HUB_TOOLS,

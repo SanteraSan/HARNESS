@@ -1,8 +1,37 @@
+import { type ServiceEntry, type ServiceTool } from "./manifest.js";
+
 export interface ListedTool {
   name: string;
   description: string;
   effect: "read" | "write";
   parameters: Record<string, unknown>;
+}
+
+export interface SelectedServiceTool {
+  service: ServiceEntry;
+  tool: ServiceTool;
+}
+
+/**
+ * Пара service и name. Совпадение имени в другом сервисе не подставляется:
+ * повтор имени для модели манифест не загружает.
+ */
+export function selectServiceTool(
+  services: readonly ServiceEntry[],
+  serviceId: string,
+  toolName: string,
+): SelectedServiceTool | undefined {
+  for (const service of services) {
+    if (service.id !== serviceId) {
+      continue;
+    }
+    for (const tool of service.tools) {
+      if (tool.name === toolName) {
+        return { service, tool };
+      }
+    }
+  }
+  return undefined;
 }
 
 /**

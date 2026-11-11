@@ -16,9 +16,11 @@ import {
   parseToolResponse,
 } from "../../contract/index.js";
 import {
+  ENV_NAME_RE,
   FINGERPRINT_RE,
   SERVICE_ID_RE,
   TOOL_CALL_ID_RE,
+  TOOL_ERROR_CODES,
   TOOL_NAME_RE,
   UUID_RE,
 } from "../../contract/limits.js";
@@ -27,22 +29,8 @@ const RUN_ID = "00000000-0000-4000-8000-000000000010";
 const AGENT_ID = "00000000-0000-4000-8000-000000000001";
 const PIN = "a".repeat(64);
 
-const LOOPBACK_URL = new RegExp(
-  "^(?:https?://(?:127\\.0\\.0\\.1|127\\.0\\.0\\.1:(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])))/?$",
-);
-const PRIVATE_10_URL = new RegExp(
-  "^https://(?:10\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])|10\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5]):(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))/?$",
-);
-const PRIVATE_172_URL = new RegExp(
-  "^https://(?:172\\.(?:1[6-9]|2[0-9]|3[0-1])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])|172\\.(?:1[6-9]|2[0-9]|3[0-1])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5]):(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))/?$",
-);
-const PRIVATE_192_URL = new RegExp(
-  "^https://(?:192\\.168\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])|192\\.168\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5]):(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))/?$",
-);
-const ADDRESS_PATTERNS = [LOOPBACK_URL, PRIVATE_10_URL, PRIVATE_172_URL, PRIVATE_192_URL];
-
-/** Схема error: нет C0, DEL и C1, не длиннее 400 единиц UTF-16. Длину в кодпоинтах режет maxLength. */
-const ERROR_TEXT_PATTERN = "^[^\\u0000-\\u001F\\u007F\\u0080-\\u009F]{1,400}$";
+/** Паттерн error не задаёт второй потолок. Длину режет maxLength в кодпоинтах. */
+const ERROR_TEXT_PATTERN = "^[^\\u0000-\\u001F\\u007F\\u0080-\\u009F]*$";
 
 const PATH_PARAMETERS = {
   type: "object",
@@ -221,20 +209,35 @@ describe("schema and parser agreement", () => {
     ).toBe(true);
   });
 
-  it("должен выразить в схеме те же ограничения base_url, что применяет разбор", async () => {
+  it("должен дать один вердикт base_url у разбора и у шаблона схемы", async () => {
     const services = await readJson("harness.services.v1.schema.json");
-    const baseUrl = dig(services, ["$defs", "service", "properties", "base_url"]);
-    const anyOf = own(baseUrl, "anyOf");
-    expect(Array.isArray(anyOf)).toBe(true);
-    if (!Array.isArray(anyOf)) {
+    const patterns = patternList(dig(services, ["$defs", "service", "properties", "base_url", "anyOf"]));
+    expect(patterns.length).toBeGreaterThan(0);
+    const loopbackPattern = dig(services, [
+      "$defs",
+      "service",
+      "allOf",
+      "0",
+      "if",
+      "properties",
+      "base_url",
+      "pattern",
+    ]);
+    const nonePattern = dig(services, [
+      "$defs",
+      "service",
+      "allOf",
+      "1",
+      "then",
+      "properties",
+      "base_url",
+      "pattern",
+    ]);
+    expect(typeof loopbackPattern).toBe("string");
+    expect(typeof nonePattern).toBe("string");
+    if (typeof loopbackPattern !== "string" || typeof nonePattern !== "string") {
       return;
     }
-    expect(anyOf.map((entry) => own(entry, "pattern"))).toEqual(
-      ADDRESS_PATTERNS.map(publishedPattern),
-    );
-    expect(
-      dig(services, ["$defs", "service", "allOf", "0", "if", "properties", "base_url", "pattern"]),
-    ).toBe(publishedPattern(LOOPBACK_URL));
     expect(dig(services, ["$defs", "service", "allOf", "0", "else", "required"])).toEqual([
       "tls_fingerprint256",
     ]);
@@ -247,49 +250,61 @@ describe("schema and parser agreement", () => {
     expect(dig(services, ["$defs", "tool", "properties", "name", "pattern"])).toBe(
       TOOL_NAME_RE.source,
     );
+    expect(dig(services, ["$defs", "auth", "properties", "env", "pattern"])).toBe(ENV_NAME_RE.source);
+    expect(dig(services, ["$defs", "tool", "properties", "version", "const"])).toBe("1");
 
-    const accepted = [
-      "http://127.0.0.1/",
-      "http://127.0.0.1",
-      "https://127.0.0.1/",
-      "http://127.0.0.1:65535/",
-      "https://10.0.0.1/",
-      "https://10.255.255.255:443",
-      "https://172.16.0.1/",
-      "https://172.31.255.255/",
-      "https://192.168.1.1:8080/",
+    const cases = [
+      { url: "http://127.0.0.1:65535/", ok: true },
+      { url: "http://127.0.0.1:65536/", ok: false },
+      { url: "http://127.0.0.1:0/", ok: false },
+      { url: "https://10.0.0.1:443", ok: true },
+      { url: "http://127.0.0.1/", ok: true },
+      { url: "http://127.0.0.1", ok: true },
+      { url: "https://10.1.2.3/", ok: true },
+      { url: "https://10.1.2.3", ok: true },
+      { url: "https://127.0.0.1/", ok: true },
+      { url: "http://127.0.0.2/", ok: false },
+      { url: "http://localhost/", ok: false },
+      { url: "http://[::1]/", ok: false },
+      { url: "https://10.0.0.1/", ok: true },
+      { url: "https://10.255.255.255/", ok: true },
+      { url: "https://172.16.0.1/", ok: true },
+      { url: "https://172.31.255.255/", ok: true },
+      { url: "https://192.168.1.1:8080/", ok: true },
+      { url: "https://172.15.0.1/", ok: false },
+      { url: "https://172.32.0.1/", ok: false },
+      { url: "https://192.169.1.1/", ok: false },
+      { url: "https://8.8.8.8/", ok: false },
+      { url: "http://0.0.0.0/", ok: false },
+      { url: "http://10.1.2.3/", ok: false },
+      { url: "http://192.168.1.1/", ok: false },
+      { url: "http://127.0.0.1/notes", ok: false },
+      { url: "https://10.01.2.3/", ok: false },
+      { url: "HTTP://127.0.0.1/", ok: false },
     ];
-    const rejected = [
-      "http://10.1.2.3/",
-      "http://127.0.0.1:65536/",
-      "http://127.0.0.1:0/",
-      "https://172.15.0.1/",
-      "https://172.32.0.1/",
-      "https://192.169.1.1/",
-      "https://8.8.8.8/",
-      "http://0.0.0.0/",
-      "http://127.0.0.2/",
-      "http://localhost/",
-      "http://[::1]/",
-      "http://127.0.0.1/notes",
-      "https://10.01.2.3/",
-      "HTTP://127.0.0.1/",
-    ];
-    for (const url of accepted) {
-      expect(addressAllowed(url)).toBe(true);
-      expect(manifestOk(PATH_PARAMETERS, url, PIN)).toBe(true);
+    for (const sample of cases) {
+      expect(matchesAnyPattern(patterns, sample.url)).toBe(sample.ok);
+      expect(manifestOk(PATH_PARAMETERS, sample.url, PIN)).toBe(sample.ok);
     }
-    for (const url of rejected) {
-      expect(addressAllowed(url)).toBe(false);
-      expect(manifestOk(PATH_PARAMETERS, url, PIN)).toBe(false);
-    }
-    expect(addressAllowed("http://127.0.0.1/")).toBe(true);
-    expect(LOOPBACK_URL.test("http://127.0.0.1/")).toBe(true);
+    expect(matchesSchemaPattern(loopbackPattern, "http://127.0.0.1/")).toBe(true);
+    expect(matchesSchemaPattern(loopbackPattern, "https://10.1.2.3/")).toBe(false);
     expect(manifestOk(PATH_PARAMETERS, "http://127.0.0.1/")).toBe(true);
-    expect(LOOPBACK_URL.test("https://10.1.2.3/")).toBe(false);
     expect(manifestOk(PATH_PARAMETERS, "https://10.1.2.3/")).toBe(false);
     expect(manifestOk(PATH_PARAMETERS, "https://10.1.2.3/", "A".repeat(64))).toBe(false);
     expect(manifestOk(PATH_PARAMETERS, "https://127.0.0.1/")).toBe(true);
+
+    const noneCases = [
+      { url: "http://127.0.0.1:9/", ok: true },
+      { url: "http://127.0.0.1:9", ok: true },
+      { url: "http://127.0.0.1/", ok: false },
+      { url: "https://127.0.0.1:9/", ok: false },
+      { url: "http://10.1.2.3:9/", ok: false },
+      { url: "http://localhost:9/", ok: false },
+    ];
+    for (const sample of noneCases) {
+      expect(matchesSchemaPattern(nonePattern, sample.url)).toBe(sample.ok);
+      expect(manifestNone(PATH_PARAMETERS, sample.url).ok).toBe(sample.ok);
+    }
   });
 
   it("должен не пускать во вложенные properties слова, которые бракует разбор", async () => {
@@ -304,7 +319,6 @@ describe("schema and parser agreement", () => {
     expect(keys).toEqual([
       "additionalProperties",
       "enum",
-      "maxItems",
       "maxLength",
       "minLength",
       "properties",
@@ -364,9 +378,15 @@ describe("schema and parser agreement", () => {
   it("должен не пускать в error символы, которые отвергает разбор", async () => {
     const responseSchema = await readJson("harness.tool.v1.response.schema.json");
     const error = dig(responseSchema, ["properties", "error"]);
+    expect(dig(responseSchema, ["properties", "error_code", "enum"])).toEqual([
+      ...TOOL_ERROR_CODES,
+    ]);
     expect(own(error, "pattern")).toBe(ERROR_TEXT_PATTERN);
+    expect(String(own(error, "pattern")).includes("{")).toBe(false);
     expect(own(error, "minLength")).toBe(1);
     expect(own(error, "maxLength")).toBe(200);
+    expect("🙂".repeat(200).length).toBe(400);
+    expect(codePointLength("🙂".repeat(200))).toBe(200);
 
     const samples = [
       { text: "path escapes root", ok: true },
@@ -396,6 +416,7 @@ function requestBody(override: { run_id?: string; tool_call_id?: string; name?: 
     run_id: override.run_id ?? RUN_ID,
     tool_call_id: override.tool_call_id ?? "call_1",
     agent_id: AGENT_ID,
+    service: "files",
     name: override.name ?? "read_file",
     arguments: { path: "notes/a.txt" },
   });
@@ -406,6 +427,7 @@ function failureBody(error: string): string {
     contract: CONTRACT_VERSION,
     ok: false,
     error,
+    error_code: "internal",
     truncated: false,
     duration_ms: 1,
     blobs: [],
@@ -413,18 +435,19 @@ function failureBody(error: string): string {
 }
 
 function schemaAllowsError(text: string): boolean {
-  return errorUnitsAllowed(text) && codePointLength(text) >= 1 && codePointLength(text) <= 200;
+  return errorCharsAllowed(text) && codePointLength(text) >= 1 && codePointLength(text) <= 200;
 }
 
-function errorUnitsAllowed(text: string): boolean {
-  if (text.length < 1 || text.length > 400) {
-    return false;
-  }
-  for (let index = 0; index < text.length; index += 1) {
-    const code = text.charCodeAt(index);
+function errorCharsAllowed(text: string): boolean {
+  for (let index = 0; index < text.length; ) {
+    const code = text.codePointAt(index);
+    if (code === undefined) {
+      return false;
+    }
     if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
       return false;
     }
+    index += code > 0xffff ? 2 : 1;
   }
   return true;
 }
@@ -443,13 +466,45 @@ function manifestOk(parameters: unknown, baseUrl = "http://127.0.0.1/", pin?: st
   return parseServicesManifest(manifest([tool("read_file", parameters)], baseUrl, pin)).ok;
 }
 
-function addressAllowed(url: string): boolean {
-  return ADDRESS_PATTERNS.some((pattern) => pattern.test(url));
+function manifestNone(parameters: unknown, baseUrl: string) {
+  const document = manifest([tool("read_file", parameters)], baseUrl);
+  const service = document.services[0];
+  if (service === undefined) {
+    throw new Error("service fixture is invalid");
+  }
+  service.auth = { type: "none" };
+  return parseServicesManifest(document);
+}
+
+function patternList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const patterns: string[] = [];
+  for (const entry of value) {
+    const pattern = own(entry, "pattern");
+    if (typeof pattern === "string") {
+      patterns.push(pattern);
+    }
+  }
+  return patterns;
+}
+
+function matchesAnyPattern(patterns: readonly string[], value: string): boolean {
+  return patterns.some((pattern) => matchesSchemaPattern(pattern, value));
+}
+
+function matchesSchemaPattern(pattern: string, value: string): boolean {
+  // Паттерн — строка из harness.services.v1.schema.json этого репозитория, не ввод пользователя.
+  // Генератор выражения не строится: тест читает уже записанный шаблон.
+  // eslint-disable-next-line security/detect-non-literal-regexp
+  return new RegExp(pattern).test(value);
 }
 
 function tool(name: string, parameters: unknown): Record<string, unknown> {
   return {
     name,
+    version: "1",
     effect: "read",
     description: "Читает файл.",
     accepts_blobs: false,
@@ -457,10 +512,14 @@ function tool(name: string, parameters: unknown): Record<string, unknown> {
   };
 }
 
-function manifest(tools: unknown[], baseUrl: string, pin?: string): Record<string, unknown> {
+function manifest(tools: unknown[], baseUrl: string, pin?: string): {
+  contract: string;
+  services: Record<string, unknown>[];
+} {
   const service: Record<string, unknown> = {
     id: "files",
     base_url: baseUrl,
+    auth: { type: "bearer", env: "FILES_TOKEN" },
     tools,
   };
   if (pin !== undefined) {
@@ -470,11 +529,6 @@ function manifest(tools: unknown[], baseUrl: string, pin?: string): Record<strin
     contract: "harness.services.v1",
     services: [service],
   };
-}
-
-/** V8 в source экранирует слэш. В схеме слэш записан как есть. */
-function publishedPattern(pattern: RegExp): string {
-  return pattern.source.replaceAll("\\/", "/");
 }
 
 function findStringEnum(guards: readonly unknown[]): unknown {

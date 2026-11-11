@@ -24,6 +24,7 @@ function callBody(name: string, args: unknown, toolCallId = CALL_ID): string {
     run_id: RUN_ID,
     tool_call_id: toolCallId,
     agent_id: AGENT_ID,
+    service: "files",
     name,
     arguments: args,
   });
@@ -84,6 +85,16 @@ describe("tool arguments", () => {
     });
   });
 
+  it("должен принять text из эмодзи на пределе кодпоинтов и отвергнуть на один длиннее", () => {
+    const text = "🙂".repeat(RECORD_NOTE_TEXT_MAX);
+    expect(text.length).toBe(RECORD_NOTE_TEXT_MAX * 2);
+    expect(parseToolArguments("record_note", { path: "out/a.txt", text }).ok).toBe(true);
+    expect(parseToolArguments("record_note", { path: "out/a.txt", text: `${text}🙂` })).toEqual({
+      ok: false,
+      reason: "invalid_body",
+    });
+  });
+
   it("должен отвергнуть idempotency_key в аргументах сервиса и снять его с копии хаба", () => {
     const args = { path: "out/a.txt", text: "note", idempotency_key: "local-key" };
     expect(parseToolArguments("record_note", args)).toEqual({
@@ -97,6 +108,70 @@ describe("tool arguments", () => {
     }
     expect(stripped.value).toEqual({ path: "out/a.txt", text: "note" });
     expect(parseToolArguments("record_note", stripped.value).ok).toBe(true);
+  });
+
+  it("должен снять idempotency_key до строгой проверки и не дать conflict на том же тексте", () => {
+    const plain = parseToolCall(
+      input(callBody("record_note", { path: "out/a.txt", text: "note" }), "record_note", KEY),
+    );
+    const extra = parseToolCall(
+      input(
+        callBody("record_note", {
+          path: "out/a.txt",
+          text: "note",
+          idempotency_key: "local-key",
+        }),
+        "record_note",
+        KEY,
+      ),
+    );
+    const other = parseToolCall(
+      input(
+        callBody("record_note", {
+          path: "out/a.txt",
+          text: "note",
+          idempotency_key: "other-key",
+        }),
+        "record_note",
+        KEY,
+      ),
+    );
+    expect(plain.ok && extra.ok && other.ok).toBe(true);
+    if (!plain.ok || !extra.ok || !other.ok) {
+      return;
+    }
+    expect(extra.value.arguments).toEqual({ path: "out/a.txt", text: "note" });
+    expect(extra.value.request.arguments).toEqual({ path: "out/a.txt", text: "note" });
+    expect(extra.value.canonicalText.includes("idempotency_key")).toBe(false);
+    expect(Buffer.compare(plain.value.bodySha256, extra.value.bodySha256)).toBe(0);
+    expect(Buffer.compare(plain.value.bodySha256, other.value.bodySha256)).toBe(0);
+    expect(
+      compareIdempotency({
+        effect: "write",
+        key: `${RUN_ID}:${CALL_ID}`,
+        bodySha256: extra.value.bodySha256,
+        stored: {
+          key: `${RUN_ID}:${CALL_ID}`,
+          bodySha256: plain.value.bodySha256,
+          state: "done",
+          response: storedResponse,
+        },
+      }),
+    ).toEqual({ kind: "replay", response: storedResponse });
+    expect(
+      parseToolCall(
+        input(
+          callBody("record_note", {
+            path: "out/a.txt",
+            text: "note",
+            idempotency_key: "local-key",
+            extra: true,
+          }),
+          "record_note",
+          KEY,
+        ),
+      ),
+    ).toEqual({ ok: false, reason: "unknown_field" });
   });
 });
 
@@ -168,6 +243,7 @@ describe("compareIdempotency", () => {
         JSON.stringify({
           arguments: { text: "note", path: "out/a.txt" },
           name: "record_note",
+          service: "files",
           agent_id: AGENT_ID,
           tool_call_id: CALL_ID,
           run_id: RUN_ID,
