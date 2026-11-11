@@ -8,5 +8,12 @@ export default defineConfig({
     isolate: true,
     testTimeout: 20_000,
     hookTimeout: 20_000,
+    coverage: {
+      all: true,
+      provider: "v8",
+      reporter: ["lcovonly"],
+      reportsDirectory: "coverage",
+      include: ["src/**/*.ts"],
+    },
   },
 });

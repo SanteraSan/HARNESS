@@ -58,9 +58,9 @@ export async function applyMigrations(
   }
 }
 
-async function listMigrationFiles(migrationsDir: string): Promise<string[]> {
-  // Каталог собран из расположения модуля, не из ввода. Список файлов нужен, чтобы новый SQL шёл по имени без правки этого скрипта.
-  // eslint-disable-next-line security/detect-non-literal-fs-filename -- аргумент не литерал: это фиксированный каталог migrations репозитория
+export async function listMigrationFiles(migrationsDir: string): Promise<string[]> {
+  // Каталог выбирает вызывающий код, не HTTP-ввод. Список файлов нужен, чтобы новый SQL шёл по имени без правки этого скрипта.
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- аргумент не литерал: каталог migrations репозитория или фикстура теста
   const entries = await readdir(migrationsDir, { withFileTypes: true });
   const names: string[] = [];
   for (const entry of entries) {
@@ -72,7 +72,8 @@ async function listMigrationFiles(migrationsDir: string): Promise<string[]> {
     }
     names.push(entry.name);
   }
-  names.sort();
+  // Фиксированная локаль en и numeric: порядок числового префикса не зависит от локали машины.
+  names.sort((left, right) => left.localeCompare(right, "en", { numeric: true }));
   return names;
 }
 

@@ -1,6 +1,10 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import { applyMigrations, migrationsDirectory } from "../../src/db/migrate.js";
+import { applyMigrations, listMigrationFiles, migrationsDirectory } from "../../src/db/migrate.js";
 import { loadConfig } from "../../src/config.js";
 import { sql } from "../helpers/db.js";
 
@@ -38,7 +42,7 @@ describe("migration 001", () => {
     const versions = await sql<{ version: string }[]>`
       select version from schema_migrations order by version
     `;
-    expect(versions.map((row) => row.version)).toEqual([
+    const expectedVersions = [
       "001_init.sql",
       "002_route.sql",
       "003_tasks.sql",
@@ -47,7 +51,9 @@ describe("migration 001", () => {
       "006_connector_secrets.sql",
       "007_chat_model.sql",
       "008_completion_limit.sql",
-    ]);
+    ];
+    expect(versions.map((row) => row.version)).toEqual(expectedVersions);
+    expect(await listMigrationFiles(migrationsDirectory())).toEqual(expectedVersions);
 
     const agents = await sql<{ count: number }[]>`select count(*)::int as count from agents`;
     expect(agents[0]?.count).toBe(1);
@@ -62,6 +68,18 @@ describe("migration 001", () => {
     expect(indexes.map((row) => row.indexname)).toEqual(["runs_claim_idx", "runs_dialog_idx"]);
     expect(indexes[0]?.indexdef).toContain("queued");
     expect(indexes[1]?.indexdef.toLowerCase()).toContain("chat_id");
+  });
+
+  it("должен ставить меньший числовой префикс раньше, когда сортировка без компаратора путает порядок", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "harness-migrations-"));
+    try {
+      // Код единицы меньше кода двойки, поэтому sort() без компаратора ставит 10 раньше 2.
+      await writeFile(path.join(dir, "10_later.sql"), "select 1;\n", "utf8");
+      await writeFile(path.join(dir, "2_earlier.sql"), "select 1;\n", "utf8");
+      expect(await listMigrationFiles(dir)).toEqual(["2_earlier.sql", "10_later.sql"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("должен принять source = cron и сохранить chat_id строкой", async () => {

@@ -36,6 +36,24 @@ jobs:
               ;;
           esac
 
+      # Node 22 ставится в каталог инструментов раннера.
+      # Домашний каталог разработчика и .env раннеру не отдаются.
+      - name: Node.js 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "22"
+
+      - name: Зависимости
+        run: npm ci
+
+      # lcov появляется здесь, до скана. coverage/ в git не входит.
+      # Адрес тестовой базы — секрет репозитория, не файл на раннере.
+      - name: Покрытие
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          HARNESS_TEST_DATABASE_URL: ${{ secrets.HARNESS_TEST_DATABASE_URL }}
+        run: npm run test:coverage
+
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65
         env:
