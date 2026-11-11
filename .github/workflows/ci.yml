@@ -1,0 +1,237 @@
+# SonarQube Community Build не анализирует pull request и не принимает несколько веток
+# одного проекта, поэтому скан только на push, в проект harness-<ветка>.
+# На pull request остаются тесты и Trivy. Событие pull_request_target не используется.
+# https://docs.sonarsource.com/sonarqube-community-build/feature-comparison-table
+# https://docs.sonarsource.com/sonarqube-community-build/devops-platform-integration/github-integration/adding-analysis-to-github-actions-workflow
+name: ci
+
+on:
+  push:
+    branches:
+      - dev
+      - stage
+      - prod
+  pull_request:
+    branches:
+      - dev
+      - stage
+      - prod
+
+permissions:
+  contents: read
+  # Загрузка SBOM идёт через API артефактов. При суженном contents этого права нет.
+  actions: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ci:
+    runs-on:
+      - self-hosted
+      - harness-sonar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Проверка ветки
+        run: |
+          set -euo pipefail
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              branch="$GITHUB_REF_NAME"
+              ;;
+            pull_request)
+              branch="$GITHUB_BASE_REF"
+              ;;
+            *)
+              echo "Событие вне push и pull_request" >&2
+              exit 1
+              ;;
+          esac
+          case "$branch" in
+            dev|stage|prod) ;;
+            *)
+              echo "Ветка вне dev, stage, prod" >&2
+              exit 1
+              ;;
+          esac
+
+      # Node 22 ставится в каталог инструментов раннера.
+      # Домашний каталог разработчика и .env раннеру не отдаются.
+      - name: Node.js 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "22"
+
+      - name: npm ci
+        run: npm ci
+
+      # Один прогон vitest с покрытием. lcov нужен сканеру и в git не входит.
+      # Адрес тестовой базы — секрет репозитория, не файл на раннере.
+      - name: Tests
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          HARNESS_TEST_DATABASE_URL: ${{ secrets.HARNESS_TEST_DATABASE_URL }}
+        run: npm run test:coverage
+
+      - name: SonarQube Scan
+        if: github.event_name == 'push'
+        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+          # Сканер в GitHub Actions сам подставляет sonar.branch.name.
+          # Community Build такой параметр отклоняет. Шаг анализирует код как
+          # единственную ветку проекта harness-<ветка>, без украшения pull request.
+          GITHUB_ACTIONS: "false"
+        with:
+          args: -Dsonar.projectKey=harness-${{ github.ref_name }} -Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=300
+
+      # Бинарь в каталоге job, не в дереве репозитория. sudo и Docker не используются.
+      - name: Trivy 0.76.2
+        run: |
+          set -euo pipefail
+          version="0.76.2"
+          dest="${RUNNER_TEMP}/trivy"
+          mkdir -p "$dest"
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64)
+              asset="trivy_${version}_Linux-64bit.tar.gz"
+              sum="bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf"
+              ;;
+            Linux-aarch64)
+              asset="trivy_${version}_Linux-ARM64.tar.gz"
+              sum="ab9d51f86e6a5fb936f605faff6b593ac51bc378fff4d3e8b9d58358b9c367c3"
+              ;;
+            *)
+              echo "Нет сборки Trivy для $(uname -s)-$(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          archive="${dest}/${asset}"
+          curl --fail --silent --show-error --location --proto '=https' --output "$archive" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${version}/${asset}"
+          echo "${sum}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" -C "$dest" trivy
+          rm -f "$archive"
+          chmod +x "${dest}/trivy"
+          echo "$dest" >> "$GITHUB_PATH"
+          "${dest}/trivy" --version
+
+      - name: Trivy vulnerabilities
+        run: |
+          set -euo pipefail
+          trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
+            --skip-dirs node_modules,coverage,workspace .
+
+      - name: Trivy SBOM
+        run: |
+          set -euo pipefail
+          trivy fs --scanners vuln --format cyclonedx --output sbom.cdx.json \
+            --skip-dirs node_modules,coverage,workspace .
+
+      # Совпадения пишутся во временный файл job и сразу удаляются.
+      # В лог попадают путь и правило, не само значение. Артефактом отчёт не становится.
+      - name: Trivy secrets
+        run: |
+          set -euo pipefail
+          test -f trivy-secret.yaml
+          report="${RUNNER_TEMP}/trivy-secrets.json"
+          rm -f "$report"
+          set +e
+          trivy fs --scanners secret --exit-code 1 --format json --output "$report" --quiet \
+            --secret-config trivy-secret.yaml \
+            --skip-dirs node_modules,coverage,workspace \
+            --skip-files sbom.cdx.json .
+          status=$?
+          set -e
+          if [[ ! -f "$report" ]]; then
+            echo "Trivy не записал отчёт секретов, код ${status}" >&2
+            exit 1
+          fi
+          set +e
+          REPORT="$report" node --input-type=module -e '
+          import { readFile, rm } from "node:fs/promises";
+
+          const reportPath = process.env.REPORT ?? "";
+          if (reportPath === "") {
+            process.stderr.write("Нет пути к отчёту секретов\n");
+            process.exit(1);
+          }
+
+          let raw = "";
+          try {
+            raw = await readFile(reportPath, "utf8");
+          } catch {
+            process.stderr.write("Отчёт секретов не прочитан\n");
+            process.exit(1);
+          }
+
+          await rm(reportPath, { force: true });
+
+          let doc;
+          try {
+            doc = JSON.parse(raw);
+          } catch {
+            process.stderr.write("Отчёт секретов не разобран\n");
+            process.exit(1);
+          }
+          raw = "";
+
+          const results =
+            doc !== null && typeof doc === "object" && Array.isArray(doc.Results) ? doc.Results : [];
+          const lines = [];
+          for (const item of results) {
+            if (item === null || typeof item !== "object") {
+              continue;
+            }
+            const secrets = Object.hasOwn(item, "Secrets") ? item.Secrets : undefined;
+            if (!Array.isArray(secrets)) {
+              continue;
+            }
+            const target = typeof item.Target === "string" ? item.Target : "";
+            for (const secret of secrets) {
+              if (secret === null || typeof secret !== "object") {
+                lines.push(`${target}:0 unknown`);
+                continue;
+              }
+              const rule =
+                typeof secret.RuleID === "string" && secret.RuleID !== "" ? secret.RuleID : "unknown";
+              const line =
+                typeof secret.StartLine === "number" && Number.isInteger(secret.StartLine)
+                  ? String(secret.StartLine)
+                  : "0";
+              lines.push(`${target}:${line} ${rule}`);
+            }
+          }
+
+          if (lines.length > 0) {
+            process.stdout.write(`${lines.join("\n")}\n`);
+            process.exit(1);
+          }
+          process.stdout.write("Секреты не найдены\n");
+          '
+          node_status=$?
+          set -e
+          rm -f "$report"
+          if [[ "$node_status" -ne 0 ]]; then
+            exit "$node_status"
+          fi
+          if [[ "$status" -ne 0 ]]; then
+            echo "Trivy завершился с кодом ${status}" >&2
+            exit "$status"
+          fi
+
+      # retention-days задаётся сутками, минимум 1.
+      - name: Upload SBOM
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 1
