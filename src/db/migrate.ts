@@ -73,8 +73,24 @@ export async function listMigrationFiles(migrationsDir: string): Promise<string[
     names.push(entry.name);
   }
   // Фиксированная локаль en и numeric: порядок числового префикса не зависит от локали машины.
-  names.sort((left, right) => left.localeCompare(right, "en", { numeric: true }));
+  // При нуле (2_step.sql и 02_step.sql) полное имя сравнивается по кодам UTF-16,
+  // без локали машины: порядок не следует перечислению каталога.
+  names.sort((left, right) => compareMigrationNames(left, right));
   return names;
+}
+
+function compareMigrationNames(left: string, right: string): number {
+  const numericOrder = left.localeCompare(right, "en", { numeric: true });
+  if (numericOrder !== 0) {
+    return numericOrder;
+  }
+  if (left < right) {
+    return -1;
+  }
+  if (left > right) {
+    return 1;
+  }
+  return 0;
 }
 
 async function main(): Promise<void> {
