@@ -1,0 +1,383 @@
+# Четыре job по порядку: tests → sonar → trivy → build.
+# branch-flow от этой цепочки не зависит и на push пропускается.
+# SonarQube Community Build не анализирует pull request и не принимает несколько веток
+# одного проекта, поэтому job sonar только на push, в проект harness-<ветка>.
+# На pull request этого репозитория sonar skipped и не падает; trivy и build идут
+# после успешных tests. Job с секретами на pull request из форка не стартует:
+# код форка не попадает на harness-sonar. Пропущенные tests не пускают trivy.
+# Падение tests или sonar по-прежнему не пускает trivy.
+# Событие pull_request_target не используется.
+# https://docs.sonarsource.com/sonarqube-community-build/feature-comparison-table
+# https://docs.sonarsource.com/sonarqube-community-build/devops-platform-integration/github-integration/adding-analysis-to-github-actions-workflow
+name: ci
+
+on:
+  push:
+    branches:
+      - dev
+      - stage
+      - prod
+  pull_request:
+    branches:
+      - dev
+      - stage
+      - prod
+
+permissions:
+  contents: read
+  # Загрузка lcov и SBOM идёт через API артефактов. При суженном contents этого права нет.
+  actions: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tests:
+    # Секреты базы не отдаются форку и не исполняются на self-hosted раннере.
+    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on:
+      - self-hosted
+      - harness-sonar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Проверка ветки
+        run: |
+          set -euo pipefail
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              branch="$GITHUB_REF_NAME"
+              ;;
+            pull_request)
+              branch="$GITHUB_BASE_REF"
+              ;;
+            *)
+              echo "Событие вне push и pull_request" >&2
+              exit 1
+              ;;
+          esac
+          case "$branch" in
+            dev|stage|prod) ;;
+            *)
+              echo "Ветка вне dev, stage, prod" >&2
+              exit 1
+              ;;
+          esac
+
+      # Node 22 ставится в каталог инструментов раннера.
+      # Домашний каталог разработчика и .env раннеру не отдаются.
+      - name: Node.js 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "22"
+
+      # HUSKY=0: prepare не ставит хуки на раннере и не подменяет ворота.
+      - name: npm ci
+        env:
+          HUSKY: "0"
+        run: npm ci
+
+      # Один прогон vitest с покрытием. lcov нужен сканеру и в git не входит.
+      # Адрес тестовой базы — секрет репозитория, не файл на раннере.
+      - name: Tests
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          HARNESS_TEST_DATABASE_URL: ${{ secrets.HARNESS_TEST_DATABASE_URL }}
+        run: npm run test:coverage
+
+      # Промежуточный отчёт для job sonar. Каталог в архиве не сохраняется:
+      # следующий job кладёт файл в coverage/.
+      - name: Upload lcov
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: lcov
+          path: coverage/lcov.info
+          if-no-files-found: error
+
+  sonar:
+    needs: tests
+    # На pull_request job skipped, а не зелёный и не красный.
+    # Упавшие тесты тоже оставляют sonar skipped: условие требует их success.
+    # Job только на push в ветки этого репозитория, поэтому SONAR_TOKEN не уходит в форк.
+    if: ${{ !cancelled() && needs.tests.result == 'success' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && github.event_name == 'push' && (github.ref_name == 'dev' || github.ref_name == 'stage' || github.ref_name == 'prod') }}
+    runs-on:
+      - self-hosted
+      - harness-sonar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download lcov
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: lcov
+          path: coverage
+
+      - name: Проверка lcov
+        run: |
+          set -euo pipefail
+          test -s coverage/lcov.info
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+          # Сканер в GitHub Actions сам подставляет sonar.branch.name.
+          # Community Build такой параметр отклоняет. Шаг анализирует код как
+          # единственную ветку проекта harness-<ветка>, без украшения pull request.
+          GITHUB_ACTIONS: "false"
+        with:
+          args: -Dsonar.projectKey=harness-${{ github.ref_name }} -Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=300
+
+  trivy:
+    needs:
+      - tests
+      - sonar
+    # Sonar на pull request этого репозитория skipped. Это не падение: сканирование
+    # идёт, если tests success. Пропуск tests (форк) сюда не пускает.
+    # failure() видит всю цепочку предков, поэтому красные тесты или красный sonar
+    # сюда не пускают. Отмена workflow тоже останавливает job.
+    if: ${{ !cancelled() && !failure() && needs.tests.result == 'success' && (needs.sonar.result == 'success' || needs.sonar.result == 'skipped') }}
+    runs-on:
+      - self-hosted
+      - harness-sonar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # Бинарь в каталоге job, не в дереве репозитория. sudo и Docker не используются.
+      - name: Trivy 0.76.2
+        run: |
+          set -euo pipefail
+          version="0.76.2"
+          dest="${RUNNER_TEMP}/trivy"
+          mkdir -p "$dest"
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64)
+              asset="trivy_${version}_Linux-64bit.tar.gz"
+              sum="bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf"
+              ;;
+            Linux-aarch64)
+              asset="trivy_${version}_Linux-ARM64.tar.gz"
+              sum="ab9d51f86e6a5fb936f605faff6b593ac51bc378fff4d3e8b9d58358b9c367c3"
+              ;;
+            *)
+              echo "Нет сборки Trivy для $(uname -s)-$(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          archive="${dest}/${asset}"
+          curl --fail --silent --show-error --location --proto '=https' --output "$archive" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${version}/${asset}"
+          echo "${sum}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" -C "$dest" trivy
+          rm -f "$archive"
+          chmod +x "${dest}/trivy"
+          echo "$dest" >> "$GITHUB_PATH"
+          "${dest}/trivy" --version
+
+      # Файл пишется до сканов с ненулевым кодом. Этот шаг порог HIGH/CRITICAL не валит.
+      - name: Trivy SBOM
+        id: sbom
+        run: |
+          set -euo pipefail
+          trivy fs --scanners vuln --format cyclonedx --output sbom.cdx.json \
+            --skip-dirs node_modules,coverage,workspace .
+          test -s sbom.cdx.json
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy vulnerabilities
+        run: |
+          set -euo pipefail
+          trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
+            --skip-dirs node_modules,coverage,workspace .
+
+      # Разбор отчёта ниже запускает node. Пакеты проекта и секреты базы здесь не нужны.
+      - name: Node.js 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "22"
+
+      # Совпадения пишутся во временный файл job и сразу удаляются.
+      # В лог попадают путь и правило, не само значение. Артефактом отчёт не становится.
+      - name: Trivy secrets
+        run: |
+          set -euo pipefail
+          test -f trivy-secret.yaml
+          report="${RUNNER_TEMP}/trivy-secrets.json"
+          rm -f "$report"
+          set +e
+          trivy fs --scanners secret --exit-code 1 --format json --output "$report" --quiet \
+            --secret-config trivy-secret.yaml \
+            --skip-dirs node_modules,coverage,workspace \
+            --skip-files sbom.cdx.json .
+          status=$?
+          set -e
+          if [[ ! -f "$report" ]]; then
+            echo "Trivy не записал отчёт секретов, код ${status}" >&2
+            exit 1
+          fi
+          set +e
+          REPORT="$report" node --input-type=module -e '
+          import { readFile, rm } from "node:fs/promises";
+
+          const reportPath = process.env.REPORT ?? "";
+          if (reportPath === "") {
+            process.stderr.write("Нет пути к отчёту секретов\n");
+            process.exit(1);
+          }
+
+          let raw = "";
+          try {
+            raw = await readFile(reportPath, "utf8");
+          } catch {
+            process.stderr.write("Отчёт секретов не прочитан\n");
+            process.exit(1);
+          }
+
+          await rm(reportPath, { force: true });
+
+          let doc;
+          try {
+            doc = JSON.parse(raw);
+          } catch {
+            process.stderr.write("Отчёт секретов не разобран\n");
+            process.exit(1);
+          }
+          raw = "";
+
+          const results =
+            doc !== null && typeof doc === "object" && Array.isArray(doc.Results) ? doc.Results : [];
+          const lines = [];
+          for (const item of results) {
+            if (item === null || typeof item !== "object") {
+              continue;
+            }
+            const secrets = Object.hasOwn(item, "Secrets") ? item.Secrets : undefined;
+            if (!Array.isArray(secrets)) {
+              continue;
+            }
+            const target = typeof item.Target === "string" ? item.Target : "";
+            for (const secret of secrets) {
+              if (secret === null || typeof secret !== "object") {
+                lines.push(`${target}:0 unknown`);
+                continue;
+              }
+              const rule =
+                typeof secret.RuleID === "string" && secret.RuleID !== "" ? secret.RuleID : "unknown";
+              const line =
+                typeof secret.StartLine === "number" && Number.isInteger(secret.StartLine)
+                  ? String(secret.StartLine)
+                  : "0";
+              lines.push(`${target}:${line} ${rule}`);
+            }
+          }
+
+          if (lines.length > 0) {
+            process.stdout.write(`${lines.join("\n")}\n`);
+            process.exit(1);
+          }
+          process.stdout.write("Секреты не найдены\n");
+          '
+          node_status=$?
+          set -e
+          rm -f "$report"
+          if [[ "$node_status" -ne 0 ]]; then
+            exit "$node_status"
+          fi
+          if [[ "$status" -ne 0 ]]; then
+            echo "Trivy завершился с кодом ${status}" >&2
+            exit "$status"
+          fi
+
+      # retention-days задаётся сутками, минимум 1.
+      # Загрузка идёт, если SBOM уже создан, в том числе после красного скана.
+      # В архив попадает только SBOM, не отчёт секретов.
+      - name: Upload SBOM
+        if: ${{ !cancelled() && steps.sbom.outputs.created == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # Скрипта build в package.json нет. Job проверяет сборку TypeScript текущим tsconfig.
+  # tsc конфиг процесса не читает, секреты базы сюда не входят.
+  build:
+    needs: trivy
+    runs-on:
+      - self-hosted
+      - harness-sonar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Node.js 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "22"
+
+      # HUSKY=0: prepare не ставит хуки на раннере и не подменяет ворота.
+      - name: npm ci
+        env:
+          HUSKY: "0"
+        run: npm ci
+
+      - name: tsc --noEmit
+        run: ./node_modules/.bin/tsc --noEmit
+
+  # Голова pull request: dev принимает любую ветку этого репозитория,
+  # stage — только dev, prod — только stage. Форк и чужая база падают.
+  # Секретов нет. На push job пропускается и не входит в проверки push.
+  branch-flow:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Допустимая голова
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "$HEAD_REPO" != "$THIS_REPO" ]]; then
+            echo "Форк: голова из другого репозитория" >&2
+            exit 1
+          fi
+          case "$BASE_REF" in
+            dev)
+              ;;
+            stage)
+              if [[ "$HEAD_REF" != "dev" ]]; then
+                echo "В stage входит только dev" >&2
+                exit 1
+              fi
+              ;;
+            prod)
+              if [[ "$HEAD_REF" != "stage" ]]; then
+                echo "В prod входит только stage" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "База вне dev, stage, prod" >&2
+              exit 1
+              ;;
+          esac
+          echo "Голова ${HEAD_REF} допускается в ${BASE_REF}"

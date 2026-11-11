@@ -1,0 +1,5 @@
+# Проверка типов и ESLint по индексу. Полный npm test, Sonar, Trivy и Bandit здесь не запускаются.
+set -eu
+cd "$(dirname "$0")/.."
+./node_modules/.bin/tsc --noEmit
+node ./.husky/pre-commit-eslint.mjs
