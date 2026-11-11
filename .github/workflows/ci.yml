@@ -1,7 +1,10 @@
 # Четыре job по порядку: tests → sonar → trivy → build.
 # SonarQube Community Build не анализирует pull request и не принимает несколько веток
 # одного проекта, поэтому job sonar только на push, в проект harness-<ветка>.
-# На pull request sonar skipped и не падает; trivy и build после этого идут.
+# На pull request этого репозитория sonar skipped и не падает; trivy и build идут
+# после успешных tests. Job с секретами на pull request из форка не стартует:
+# код форка не попадает на harness-sonar. Пропущенные tests не пускают trivy.
+# Падение tests или sonar по-прежнему не пускает trivy.
 # Событие pull_request_target не используется.
 # https://docs.sonarsource.com/sonarqube-community-build/feature-comparison-table
 # https://docs.sonarsource.com/sonarqube-community-build/devops-platform-integration/github-integration/adding-analysis-to-github-actions-workflow
@@ -30,12 +33,16 @@ defaults:
 
 jobs:
   tests:
+    # Секреты базы не отдаются форку и не исполняются на self-hosted раннере.
+    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on:
       - self-hosted
       - harness-sonar
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       - name: Проверка ветки
         run: |
@@ -91,7 +98,8 @@ jobs:
     needs: tests
     # На pull_request job skipped, а не зелёный и не красный.
     # Упавшие тесты тоже оставляют sonar skipped: условие требует их success.
-    if: ${{ !cancelled() && needs.tests.result == 'success' && github.event_name == 'push' && (github.ref_name == 'dev' || github.ref_name == 'stage' || github.ref_name == 'prod') }}
+    # Job только на push в ветки этого репозитория, поэтому SONAR_TOKEN не уходит в форк.
+    if: ${{ !cancelled() && needs.tests.result == 'success' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && github.event_name == 'push' && (github.ref_name == 'dev' || github.ref_name == 'stage' || github.ref_name == 'prod') }}
     runs-on:
       - self-hosted
       - harness-sonar
@@ -100,6 +108,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download lcov
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
@@ -125,17 +134,22 @@ jobs:
           args: -Dsonar.projectKey=harness-${{ github.ref_name }} -Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=300
 
   trivy:
-    needs: sonar
-    # Sonar на pull request skipped. Это не падение: сканирование продолжается.
+    needs:
+      - tests
+      - sonar
+    # Sonar на pull request этого репозитория skipped. Это не падение: сканирование
+    # идёт, если tests success. Пропуск tests (форк) сюда не пускает.
     # failure() видит всю цепочку предков, поэтому красные тесты или красный sonar
     # сюда не пускают. Отмена workflow тоже останавливает job.
-    if: ${{ !cancelled() && !failure() && (needs.sonar.result == 'success' || needs.sonar.result == 'skipped') }}
+    if: ${{ !cancelled() && !failure() && needs.tests.result == 'success' && (needs.sonar.result == 'success' || needs.sonar.result == 'skipped') }}
     runs-on:
       - self-hosted
       - harness-sonar
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       # Бинарь в каталоге job, не в дереве репозитория. sudo и Docker не используются.
       - name: Trivy 0.76.2
@@ -168,16 +182,20 @@ jobs:
           echo "$dest" >> "$GITHUB_PATH"
           "${dest}/trivy" --version
 
+      # Файл пишется до сканов с ненулевым кодом. Этот шаг порог HIGH/CRITICAL не валит.
+      - name: Trivy SBOM
+        id: sbom
+        run: |
+          set -euo pipefail
+          trivy fs --scanners vuln --format cyclonedx --output sbom.cdx.json \
+            --skip-dirs node_modules,coverage,workspace .
+          test -s sbom.cdx.json
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
       - name: Trivy vulnerabilities
         run: |
           set -euo pipefail
           trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
-            --skip-dirs node_modules,coverage,workspace .
-
-      - name: Trivy SBOM
-        run: |
-          set -euo pipefail
-          trivy fs --scanners vuln --format cyclonedx --output sbom.cdx.json \
             --skip-dirs node_modules,coverage,workspace .
 
       # Разбор отчёта ниже запускает node. Пакеты проекта и секреты базы здесь не нужны.
@@ -279,8 +297,10 @@ jobs:
           fi
 
       # retention-days задаётся сутками, минимум 1.
+      # Загрузка идёт, если SBOM уже создан, в том числе после красного скана.
+      # В архив попадает только SBOM, не отчёт секретов.
       - name: Upload SBOM
-        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        if: ${{ !cancelled() && steps.sbom.outputs.created == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: sbom
@@ -298,6 +318,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       - name: Node.js 22
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1

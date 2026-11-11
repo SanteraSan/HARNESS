@@ -82,6 +82,19 @@ describe("migration 001", () => {
     }
   });
 
+  it("должен при равном числовом префиксе сортировать полные имена без локали машины", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "harness-migrations-tie-"));
+    try {
+      // Числовое сравнение 2 и 02 даёт 0. Код «0» меньше кода «2», поэтому 02 раньше 2.
+      await writeFile(path.join(dir, "10_later.sql"), "select 1;\n", "utf8");
+      await writeFile(path.join(dir, "2_step.sql"), "select 1;\n", "utf8");
+      await writeFile(path.join(dir, "02_step.sql"), "select 1;\n", "utf8");
+      expect(await listMigrationFiles(dir)).toEqual(["02_step.sql", "2_step.sql", "10_later.sql"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("должен принять source = cron и сохранить chat_id строкой", async () => {
     const chatId = "1234567890123456789";
     await sql`
