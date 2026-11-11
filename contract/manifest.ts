@@ -1,12 +1,35 @@
 import { z } from "zod";
 
-import { codePointLength, isPlainObject, readOwn, scanData } from "./data.js";
+import { codePointLength, isCodePointBounded, isPlainObject, readOwn, scanData } from "./data.js";
 import { issueReason } from "./envelope.js";
-import { DESCRIPTION_MAX, FINGERPRINT_RE, SERVICE_ID_RE, TOOL_NAME_RE } from "./limits.js";
+import {
+  DESCRIPTION_MAX,
+  ENV_NAME_RE,
+  FINGERPRINT_RE,
+  SERVICE_ID_RE,
+  TOOL_NAME_RE,
+  TOOL_VERSION,
+} from "./limits.js";
 import { SERVICES_VERSION } from "./result.js";
+
+/** Имя localhost манифест не принимает. */
+export const LOCALHOST_BASE_URL_MESSAGE = "нужен http://127.0.0.1, не localhost";
+
+/** none не для https, не для частной сети и не для лупбэка без порта. */
+export const AUTH_NONE_MESSAGE = "auth none только для http://127.0.0.1 с портом";
+
+/** Неизвестная версия не игнорируется и не заменяется на последнюю. */
+export const UNKNOWN_TOOL_VERSION_MESSAGE = "неизвестная версия инструмента";
+
+export function duplicateModelNameMessage(name: string): string {
+  return `два сервиса отдают одно имя для модели: ${name}`;
+}
+
+export type ServiceAuth = { type: "none" } | { type: "bearer"; env: string };
 
 export interface ServiceTool {
   name: string;
+  version: typeof TOOL_VERSION;
   effect: "read" | "write";
   description: string;
   accepts_blobs: boolean;
@@ -16,6 +39,7 @@ export interface ServiceTool {
 export interface ServiceEntry {
   id: string;
   base_url: string;
+  auth: ServiceAuth;
   tls_fingerprint256?: string;
   tools: ServiceTool[];
 }
@@ -27,7 +51,11 @@ export interface ServicesManifest {
 
 export type ManifestResult =
   | { ok: true; value: ServicesManifest }
-  | { ok: false; reason: "unknown_field" | "unsupported_version" | "invalid_manifest" };
+  | {
+      ok: false;
+      reason: "unknown_field" | "unsupported_version" | "invalid_manifest";
+      message?: string;
+    };
 
 const PARAMETER_KEYS: ReadonlySet<string> = new Set([
   "type",
@@ -37,7 +65,6 @@ const PARAMETER_KEYS: ReadonlySet<string> = new Set([
   "maxLength",
   "minLength",
   "enum",
-  "maxItems",
 ]);
 
 const PARAMETER_TYPES: ReadonlySet<string> = new Set([
@@ -51,34 +78,52 @@ const PARAMETER_TYPES: ReadonlySet<string> = new Set([
 const manifestToolSchema = z
   .object({
     name: z.string().min(1).max(64).regex(TOOL_NAME_RE),
+    version: z.string(),
     effect: z.enum(["read", "write"]),
-    description: z.string().max(DESCRIPTION_MAX),
+    description: z.string().refine((value) => isCodePointBounded(value, 0, DESCRIPTION_MAX)),
     accepts_blobs: z.boolean(),
     parameters: z.unknown(),
   })
   .strict()
   .superRefine((tool, context) => {
+    if (tool.version !== TOOL_VERSION) {
+      context.addIssue({ code: "custom", message: UNKNOWN_TOOL_VERSION_MESSAGE });
+    }
     if (!parametersAllowed(tool.parameters, 0)) {
       context.addIssue({ code: "custom", message: "parameters" });
     }
   });
 
+const authSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("none") }).strict(),
+  z
+    .object({
+      type: z.literal("bearer"),
+      env: z.string().regex(ENV_NAME_RE),
+    })
+    .strict(),
+]);
+
 const serviceSchema = z
   .object({
     id: z.string().regex(SERVICE_ID_RE),
     base_url: z.string().min(1).max(128),
+    auth: authSchema,
     tls_fingerprint256: z.string().regex(FINGERPRINT_RE).optional(),
     tools: z.array(manifestToolSchema).min(1),
   })
   .strict()
   .superRefine((service, context) => {
     const base = inspectBaseUrl(service.base_url);
-    if (base === null) {
-      context.addIssue({ code: "custom", message: "base_url" });
+    if (!base.ok) {
+      context.addIssue({ code: "custom", message: base.message });
       return;
     }
     if (base.tlsRequired && service.tls_fingerprint256 === undefined) {
       context.addIssue({ code: "custom", message: "tls_fingerprint256" });
+    }
+    if (service.auth.type === "none" && !base.httpLoopbackWithPort) {
+      context.addIssue({ code: "custom", message: AUTH_NONE_MESSAGE });
     }
   });
 
@@ -91,7 +136,7 @@ const manifestSchema = z
 
 /**
  * Локальный файл оператора. Схему по сети эта функция не скачивает.
- * Секрета в манифесте нет: лишнее поле, включая вложенное, делает файл недействительным.
+ * Секрет в манифест не пишется: у bearer только имя переменной окружения.
  */
 export function parseServicesManifest(value: unknown): ManifestResult {
   const scanned = scanData(value);
@@ -106,13 +151,29 @@ export function parseServicesManifest(value: unknown): ManifestResult {
   }
   const parsed = manifestSchema.safeParse(value);
   if (!parsed.success) {
-    return {
-      ok: false,
-      reason:
-        issueReason(parsed.error.issues) === "unknown_field" ? "unknown_field" : "invalid_manifest",
-    };
+    return manifestFailure(parsed.error.issues);
   }
   return materialize(parsed.data);
+}
+
+function manifestFailure(issues: readonly { code: string; message: string }[]): ManifestResult {
+  if (issueReason(issues) === "unknown_field") {
+    return { ok: false, reason: "unknown_field" };
+  }
+  for (const issue of issues) {
+    if (issue.code === "custom" && publishedMessage(issue.message)) {
+      return { ok: false, reason: "invalid_manifest", message: issue.message };
+    }
+  }
+  return { ok: false, reason: "invalid_manifest" };
+}
+
+function publishedMessage(message: string): boolean {
+  return (
+    message === LOCALHOST_BASE_URL_MESSAGE ||
+    message === AUTH_NONE_MESSAGE ||
+    message === UNKNOWN_TOOL_VERSION_MESSAGE
+  );
 }
 
 function foreignServicesContract(value: unknown): boolean {
@@ -124,7 +185,7 @@ function foreignServicesContract(value: unknown): boolean {
 
 function materialize(parsed: z.infer<typeof manifestSchema>): ManifestResult {
   const ids = new Set<string>();
-  const names = new Set<string>();
+  const modelNames = new Map<string, string>();
   const services: ServiceEntry[] = [];
   for (const service of parsed.services) {
     if (ids.has(service.id)) {
@@ -133,15 +194,27 @@ function materialize(parsed: z.infer<typeof manifestSchema>): ManifestResult {
     ids.add(service.id);
     const tools: ServiceTool[] = [];
     for (const tool of service.tools) {
-      if (names.has(tool.name)) {
-        return { ok: false, reason: "invalid_manifest" };
+      if (tool.version !== TOOL_VERSION) {
+        return { ok: false, reason: "invalid_manifest", message: UNKNOWN_TOOL_VERSION_MESSAGE };
       }
-      names.add(tool.name);
+      const owner = modelNames.get(tool.name);
+      if (owner !== undefined) {
+        return {
+          ok: false,
+          reason: "invalid_manifest",
+          message:
+            owner === service.id
+              ? `имя для модели повторяется: ${tool.name}`
+              : duplicateModelNameMessage(tool.name),
+        };
+      }
+      modelNames.set(tool.name, service.id);
       if (!isPlainObject(tool.parameters)) {
         return { ok: false, reason: "invalid_manifest" };
       }
       tools.push({
         name: tool.name,
+        version: TOOL_VERSION,
         effect: tool.effect,
         description: tool.description,
         accepts_blobs: tool.accepts_blobs,
@@ -151,6 +224,7 @@ function materialize(parsed: z.infer<typeof manifestSchema>): ManifestResult {
     const entry: ServiceEntry = {
       id: service.id,
       base_url: service.base_url,
+      auth: service.auth,
       tools,
     };
     if (service.tls_fingerprint256 !== undefined) {
@@ -161,13 +235,17 @@ function materialize(parsed: z.infer<typeof manifestSchema>): ManifestResult {
   return { ok: true, value: { contract: SERVICES_VERSION, services } };
 }
 
-interface BaseUrl {
+interface BaseUrlOk {
+  ok: true;
   tlsRequired: boolean;
+  httpLoopbackWithPort: boolean;
 }
 
-function inspectBaseUrl(value: string): BaseUrl | null {
+type BaseUrl = BaseUrlOk | { ok: false; message: string };
+
+function inspectBaseUrl(value: string): BaseUrl {
   if (value.length === 0 || value.length > 128) {
-    return null;
+    return { ok: false, message: "base_url" };
   }
   let protocol: "http" | "https";
   let rest: string;
@@ -178,7 +256,7 @@ function inspectBaseUrl(value: string): BaseUrl | null {
     protocol = "http";
     rest = value.slice("http://".length);
   } else {
-    return null;
+    return { ok: false, message: "base_url" };
   }
   if (
     rest.includes("@") ||
@@ -189,34 +267,45 @@ function inspectBaseUrl(value: string): BaseUrl | null {
     rest.includes(" ") ||
     rest.includes("\\")
   ) {
-    return null;
+    return { ok: false, message: "base_url" };
   }
   if (rest.endsWith("/")) {
     rest = rest.slice(0, -1);
   }
   if (rest.length === 0 || rest.includes("/")) {
-    return null;
+    return { ok: false, message: "base_url" };
   }
   let host = rest;
+  let hasPort = false;
   const colon = rest.lastIndexOf(":");
   if (colon !== -1) {
     host = rest.slice(0, colon);
+    hasPort = true;
     if (!isPort(rest.slice(colon + 1))) {
-      return null;
+      return { ok: false, message: "base_url" };
     }
+  }
+  if (host.toLowerCase() === "localhost") {
+    return { ok: false, message: LOCALHOST_BASE_URL_MESSAGE };
   }
   const octets = parseIpv4(host);
   if (octets === null) {
-    return null;
+    return { ok: false, message: "base_url" };
   }
   const loopback = octets[0] === 127 && octets[1] === 0 && octets[2] === 0 && octets[3] === 1;
   if (protocol === "http") {
-    return loopback ? { tlsRequired: false } : null;
+    if (!loopback) {
+      return { ok: false, message: "base_url" };
+    }
+    return { ok: true, tlsRequired: false, httpLoopbackWithPort: hasPort };
   }
   if (loopback) {
-    return { tlsRequired: false };
+    return { ok: true, tlsRequired: false, httpLoopbackWithPort: false };
   }
-  return isPrivate(octets) ? { tlsRequired: true } : null;
+  if (!isPrivate(octets)) {
+    return { ok: false, message: "base_url" };
+  }
+  return { ok: true, tlsRequired: true, httpLoopbackWithPort: false };
 }
 
 function isPort(value: string): boolean {
@@ -281,7 +370,10 @@ function isPrivate(octets: readonly [number, number, number, number]): boolean {
   return first === 192 && second === 168;
 }
 
-/** Слова pattern, $ref, $data, allOf, items и любое иное схему манифеста бракуют. */
+/**
+ * Слова pattern, $ref, $data, allOf, items, maxItems и любое иное схему бракуют.
+ * Массива в параметрах нет: items запрещён, maxItems ничего не ограничивает.
+ */
 function parametersAllowed(value: unknown, depth: number): boolean {
   if (depth > 8 || !isPlainObject(value)) {
     return false;
@@ -320,10 +412,7 @@ function parametersAllowed(value: unknown, depth: number): boolean {
   if (!lengthAllowed(value, type)) {
     return false;
   }
-  if (!enumAllowed(readOwn(value, "enum"), type)) {
-    return false;
-  }
-  return maxItemsAllowed(readOwn(value, "maxItems"));
+  return enumAllowed(readOwn(value, "enum"), type);
 }
 
 function propertiesAllowed(value: unknown, depth: number): boolean {
@@ -338,7 +427,7 @@ function propertiesAllowed(value: unknown, depth: number): boolean {
     return false;
   }
   for (const name of names) {
-    if (name.length === 0 || name.length > 64) {
+    if (!isCodePointBounded(name, 1, 64)) {
       return false;
     }
     const descriptor = Object.getOwnPropertyDescriptor(value, name);
@@ -358,7 +447,7 @@ function requiredAllowed(value: unknown, owner: object): boolean {
   }
   const properties = readOwn(owner, "properties");
   for (const item of value) {
-    if (typeof item !== "string" || item.length === 0 || item.length > 64) {
+    if (typeof item !== "string" || !isCodePointBounded(item, 1, 64)) {
       return false;
     }
     // Имени нет среди properties, а additionalProperties ложен: такого объекта не бывает.
@@ -420,13 +509,6 @@ function enumMemberMatchesType(item: unknown, type: string): boolean {
     return typeof item === "number" && Number.isFinite(item);
   }
   return false;
-}
-
-function maxItemsAllowed(value: unknown): boolean {
-  if (value === undefined) {
-    return true;
-  }
-  return isBoundedInt(value, 32);
 }
 
 function isBoundedInt(value: unknown, max: number): boolean {

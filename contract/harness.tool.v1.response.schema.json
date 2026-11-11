@@ -15,11 +15,12 @@
       "type": "array",
       "maxItems": 8,
       "uniqueItems": true,
+      "description": "Id принадлежат хабу. Сервис сначала отдаёт байты хабу и возвращает его id. GET блоба на base_url сервиса нет, поля blobs_url нет.",
       "items": {
         "type": "string",
         "minLength": 36,
         "maxLength": 36,
-        "description": "uuid в нижнем регистре"
+        "description": "uuid в нижнем регистре, выпущенный хабом"
       }
     },
     "text": {
@@ -31,8 +32,20 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 200,
-      "pattern": "^[^\\u0000-\\u001F\\u007F\\u0080-\\u009F]{1,400}$",
-      "description": "Без U+0000–U+001F, U+007F и U+0080–U+009F. Квантификатор 400 — два UTF-16 на кодпоинт, длину режет maxLength."
+      "pattern": "^[^\\u0000-\\u001F\\u007F\\u0080-\\u009F]*$",
+      "description": "Человеческая строка. Потолок длины один: maxLength в кодпоинтах. Паттерн не задаёт второй потолок. Без U+0000–U+001F, U+007F и U+0080–U+009F."
+    },
+    "error_code": {
+      "enum": [
+        "invalid_args",
+        "not_found",
+        "forbidden",
+        "too_large",
+        "conflict",
+        "unavailable",
+        "internal"
+      ],
+      "description": "Закрытый набор. path_escape нет. Разбор хаба неизвестную строку заменяет на internal."
     }
   },
   "allOf": [
@@ -43,10 +56,12 @@
       },
       "then": {
         "required": ["text"],
-        "not": { "required": ["error"] }
+        "not": {
+          "anyOf": [{ "required": ["error"] }, { "required": ["error_code"] }]
+        }
       },
       "else": {
-        "required": ["error"],
+        "required": ["error", "error_code"],
         "not": { "required": ["text"] },
         "properties": {
           "blobs": { "maxItems": 0 }

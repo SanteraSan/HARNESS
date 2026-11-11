@@ -1,10 +1,10 @@
 import { z } from "zod";
 
 import { canonicalBody } from "./canonical.js";
-import { enumerableNames, isPlainObject, readOwn, scanData } from "./data.js";
+import { enumerableNames, isCodePointBounded, isPlainObject, readOwn, scanData } from "./data.js";
 import { issueReason, parseToolRequest, type ToolRequest } from "./envelope.js";
 import { parseIdempotencyHeader } from "./idempotency.js";
-import { RECORD_NOTE_TEXT_MAX, TOOL_NAME_RE, TOOL_PATH_MAX } from "./limits.js";
+import { RECORD_NOTE_TEXT_MAX, TOOL_NAME_RE, TOOL_PATH_MAX, TOOL_VERSION } from "./limits.js";
 import { CONTRACT_VERSION, type ParseResult } from "./result.js";
 
 export const TOOL_CALL_METHOD = "POST";
@@ -24,7 +24,7 @@ export const LIST_DIR_DESCRIPTION =
 export const RECORD_NOTE_DESCRIPTION =
   "Записывает текстовый файл в каталог out. Повтор с тем же ключом идемпотентности возвращает первый результат и не создаёт второй файл.";
 
-const pathSchema = z.string().min(1).max(TOOL_PATH_MAX);
+const pathSchema = z.string().refine((value) => isCodePointBounded(value, 1, TOOL_PATH_MAX));
 
 export const readFileArgumentsSchema = z
   .object({
@@ -47,13 +47,14 @@ export const listDirArgumentsSchema = z
 export const recordNoteArgumentsSchema = z
   .object({
     path: pathSchema,
-    text: z.string().min(1).max(RECORD_NOTE_TEXT_MAX),
+    text: z.string().refine((value) => isCodePointBounded(value, 1, RECORD_NOTE_TEXT_MAX)),
   })
   .strict();
 
 export const HUB_TOOLS = [
   {
     name: "read_file",
+    version: TOOL_VERSION,
     description: READ_FILE_DESCRIPTION,
     effect: "read",
     acceptsBlobs: false,
@@ -65,6 +66,7 @@ export const HUB_TOOLS = [
   },
   {
     name: "list_dir",
+    version: TOOL_VERSION,
     description: LIST_DIR_DESCRIPTION,
     effect: "read",
     acceptsBlobs: false,
@@ -76,6 +78,7 @@ export const HUB_TOOLS = [
   },
   {
     name: "record_note",
+    version: TOOL_VERSION,
     description: RECORD_NOTE_DESCRIPTION,
     effect: "write",
     acceptsBlobs: false,
@@ -93,6 +96,7 @@ export type HubToolEffect = (typeof HUB_TOOLS)[number]["effect"];
 
 export interface ParsedToolCall {
   request: ToolRequest;
+  service: string;
   toolName: HubToolName;
   effect: HubToolEffect;
   arguments: Record<string, unknown>;
@@ -200,6 +204,8 @@ function parseArguments(
 
 /**
  * Разбор вызова. Сеть не открывает и воркер отсюда не зовётся.
+ * Сначала снимает idempotency_key, потом строго проверяет аргументы.
+ * Хеш считается по телу, которое уйдёт сервису, уже без этого ключа.
  * Для write заголовок идемпотентности обязателен. Для read его отсутствие — не ошибка.
  */
 export function parseToolCall(input: ToolCallInput): ParseResult<ParsedToolCall> {
@@ -221,7 +227,11 @@ export function parseToolCall(input: ToolCallInput): ParseResult<ParsedToolCall>
   if (tool === undefined) {
     return { ok: false, reason: "unknown_tool" };
   }
-  const args = parseToolArguments(tool.name, request.value.arguments);
+  const stripped = omitIdempotencyArgument(request.value.arguments);
+  if (!stripped.ok) {
+    return stripped;
+  }
+  const args = parseToolArguments(tool.name, stripped.value);
   if (!args.ok) {
     return args;
   }
@@ -238,14 +248,19 @@ export function parseToolCall(input: ToolCallInput): ParseResult<ParsedToolCall>
   ) {
     return { ok: false, reason: "invalid_body" };
   }
-  const canonical = canonicalBody(request.value);
+  const outbound: ToolRequest = {
+    ...request.value,
+    arguments: args.value,
+  };
+  const canonical = canonicalBody(outbound);
   if (!canonical.ok) {
     return canonical;
   }
   return {
     ok: true,
     value: {
-      request: request.value,
+      request: outbound,
+      service: outbound.service,
       toolName: tool.name,
       effect: tool.effect,
       arguments: args.value,

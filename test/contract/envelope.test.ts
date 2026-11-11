@@ -18,12 +18,13 @@ const RUN_ID = "00000000-0000-4000-8000-000000000010";
 const AGENT_ID = "00000000-0000-4000-8000-000000000001";
 const CALL_ID = "call_1";
 
-function requestBody(name: string, args: unknown): string {
+function requestBody(name: string, args: unknown, service = "files"): string {
   return JSON.stringify({
     contract: CONTRACT_VERSION,
     run_id: RUN_ID,
     tool_call_id: CALL_ID,
     agent_id: AGENT_ID,
+    service,
     name,
     arguments: args,
   });
@@ -82,6 +83,7 @@ describe("harness.tool.v1 envelope", () => {
         contract: CONTRACT_VERSION,
         ok: false,
         error: "path escapes root",
+        error_code: "forbidden",
         truncated: false,
         duration_ms: 2,
         blobs: [],
@@ -132,7 +134,7 @@ describe("harness.tool.v1 envelope", () => {
   });
 
   it("должен отвергнуть идентификатор, который не строка", () => {
-    const raw = `{"contract":"${CONTRACT_VERSION}","run_id":10,"tool_call_id":"${CALL_ID}","agent_id":"${AGENT_ID}","name":"read_file","arguments":{"path":"a"}}`;
+    const raw = `{"contract":"${CONTRACT_VERSION}","run_id":10,"tool_call_id":"${CALL_ID}","agent_id":"${AGENT_ID}","service":"files","name":"read_file","arguments":{"path":"a"}}`;
     expect(parseToolRequest(raw)).toEqual({ ok: false, reason: "invalid_body" });
   });
 
@@ -167,6 +169,7 @@ describe("harness.tool.v1 envelope", () => {
       ok: false,
       text: "a",
       error: "path escapes root",
+      error_code: "forbidden",
       truncated: false,
       duration_ms: 1,
       blobs: [],
@@ -183,6 +186,7 @@ describe("harness.tool.v1 envelope", () => {
       contract: CONTRACT_VERSION,
       ok: false,
       error: "path\nescapes",
+      error_code: "forbidden",
       truncated: false,
       duration_ms: 1,
       blobs: [],
@@ -209,7 +213,7 @@ describe("harness.tool.v1 envelope", () => {
   });
 
   it("должен отвергнуть повтор ключа в одном объекте", () => {
-    const raw = `{"contract":"${CONTRACT_VERSION}","contract":"${CONTRACT_VERSION}","run_id":"${RUN_ID}","tool_call_id":"${CALL_ID}","agent_id":"${AGENT_ID}","name":"read_file","arguments":{"path":"a"}}`;
+    const raw = `{"contract":"${CONTRACT_VERSION}","contract":"${CONTRACT_VERSION}","run_id":"${RUN_ID}","tool_call_id":"${CALL_ID}","agent_id":"${AGENT_ID}","service":"files","name":"read_file","arguments":{"path":"a"}}`;
     expect(parseToolRequest(raw)).toEqual({ ok: false, reason: "invalid_body" });
   });
 
@@ -220,6 +224,7 @@ describe("harness.tool.v1 envelope", () => {
       "contract",
       "name",
       "run_id",
+      "service",
       "tool_call_id",
     ]);
     expect(RESPONSE_FIELD_NAMES).toEqual([
@@ -227,6 +232,7 @@ describe("harness.tool.v1 envelope", () => {
       "contract",
       "duration_ms",
       "error",
+      "error_code",
       "ok",
       "text",
       "truncated",
@@ -246,6 +252,75 @@ describe("harness.tool.v1 envelope", () => {
     expect(own(requestSchema, "additionalProperties")).toBe(false);
     expect(own(responseSchema, "unevaluatedProperties")).toBe(false);
     expect(own(responseSchema, "additionalProperties")).toBe(false);
+  });
+
+  it("должен принять service тем же алфавитом, что id сервиса, и отвергнуть чужой", () => {
+    expect(parseToolRequest(requestBody("read_file", { path: "notes/a.txt" })).ok).toBe(true);
+    expect(parseToolRequest(requestBody("read_file", { path: "a" }, "files.read_file"))).toEqual({
+      ok: false,
+      reason: "invalid_body",
+    });
+    expect(parseToolRequest(requestBody("read_file", { path: "a" }, "Files"))).toEqual({
+      ok: false,
+      reason: "invalid_body",
+    });
+    const missing = JSON.parse(requestBody("read_file", { path: "a" })) as Record<string, unknown>;
+    delete missing.service;
+    expect(parseToolRequest(JSON.stringify(missing))).toEqual({
+      ok: false,
+      reason: "invalid_body",
+    });
+  });
+
+  it("должен заменить неизвестный error_code на internal и оставить строку error", () => {
+    const raw = {
+      contract: CONTRACT_VERSION,
+      ok: false,
+      error: "path escapes root",
+      error_code: "path_escape",
+      truncated: false,
+      duration_ms: 2,
+      blobs: [] as string[],
+    };
+    expect(parseToolResponse(JSON.stringify(raw))).toEqual({
+      ok: true,
+      value: {
+        contract: CONTRACT_VERSION,
+        ok: false,
+        error: "path escapes root",
+        error_code: "internal",
+        truncated: false,
+        duration_ms: 2,
+        blobs: [],
+      },
+    });
+    raw.error_code = "not_found";
+    const known = parseToolResponse(JSON.stringify(raw));
+    expect(known.ok).toBe(true);
+    if (!known.ok || known.value.ok !== false) {
+      return;
+    }
+    expect(known.value.error_code).toBe("not_found");
+    expect(known.value.error).toBe("path escapes root");
+    const missing = { ...raw };
+    delete (missing as { error_code?: string }).error_code;
+    expect(parseToolResponse(JSON.stringify(missing))).toEqual({
+      ok: false,
+      reason: "invalid_body",
+    });
+    const onSuccess = {
+      contract: CONTRACT_VERSION,
+      ok: true,
+      text: "a",
+      error_code: "internal",
+      truncated: false,
+      duration_ms: 1,
+      blobs: [],
+    };
+    expect(parseToolResponse(JSON.stringify(onSuccess))).toEqual({
+      ok: false,
+      reason: "unknown_field",
+    });
   });
 
   it("должен отвергнуть лишнее поле тела HTTP-ошибки", () => {

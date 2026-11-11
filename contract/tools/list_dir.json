@@ -1,5 +1,6 @@
 {
   "name": "list_dir",
+  "version": "1",
   "effect": "read",
   "description": "Показывает один уровень каталога: имя и признак каталога. Во вложенные каталоги не спускается.",
   "accepts_blobs": false,

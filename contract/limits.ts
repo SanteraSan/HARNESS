@@ -39,6 +39,24 @@ export const SERVICE_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 
 export const FINGERPRINT_RE = /^[0-9a-f]{64}$/;
 
+/** Имя переменной окружения. Значение секрета в манифест не пишется. */
+export const ENV_NAME_RE = /^[A-Z_][A-Z0-9_]{0,127}$/;
+
+/** Единственная версия описания инструмента, которую хаб принимает. */
+export const TOOL_VERSION = "1";
+
+export const TOOL_ERROR_CODES = [
+  "invalid_args",
+  "not_found",
+  "forbidden",
+  "too_large",
+  "conflict",
+  "unavailable",
+  "internal",
+] as const;
+
+export type ToolErrorCode = (typeof TOOL_ERROR_CODES)[number];
+
 /** Режет хвост по кодпоинтам, не посреди суррогатной пары. */
 export function clipModelText(text: string): { text: string; clipped: boolean } {
   let count = 0;

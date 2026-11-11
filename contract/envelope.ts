@@ -9,9 +9,12 @@ import {
   JSON_BODY_LIMIT_BYTES,
   RESPONSE_BODY_LIMIT_BYTES,
   RESPONSE_TEXT_MAX_CODE_POINTS,
+  SERVICE_ID_RE,
   TOOL_CALL_ID_RE,
+  TOOL_ERROR_CODES,
   TOOL_NAME_RE,
   UUID_RE,
+  type ToolErrorCode,
 } from "./limits.js";
 import {
   CONTRACT_REASONS,
@@ -27,10 +30,11 @@ const requestShape = {
   run_id: uuidSchema,
   tool_call_id: z.string().min(1).max(128).regex(TOOL_CALL_ID_RE),
   agent_id: uuidSchema,
+  service: z.string().regex(SERVICE_ID_RE),
   name: z.string().min(1).max(64).regex(TOOL_NAME_RE),
   arguments: z.custom<Record<string, unknown>>((value) => isPlainObject(value)),
 } satisfies Record<
-  "agent_id" | "arguments" | "contract" | "name" | "run_id" | "tool_call_id",
+  "agent_id" | "arguments" | "contract" | "name" | "run_id" | "service" | "tool_call_id",
   z.ZodType
 >;
 
@@ -55,11 +59,26 @@ const successResponseSchema = z
   })
   .strict();
 
+/**
+ * Неизвестная строка становится internal, ответ не отвергается.
+ * path_escape в набор не входит. Нестрока остаётся ошибкой разбора.
+ */
+const errorCodeSchema = z.preprocess((value) => {
+  if (typeof value !== "string") {
+    return value;
+  }
+  if (isToolErrorCode(value)) {
+    return value;
+  }
+  return "internal";
+}, z.enum(TOOL_ERROR_CODES));
+
 const failureResponseSchema = z
   .object({
     contract: z.literal(CONTRACT_VERSION),
     ok: z.literal(false),
     error: z.string().refine((value) => isToolErrorText(value)),
+    error_code: errorCodeSchema,
     truncated: z.boolean(),
     duration_ms: z.number().int().min(0).max(DURATION_MS_MAX),
     blobs: z.array(uuidSchema).max(0),
@@ -76,6 +95,7 @@ export const RESPONSE_FIELD_NAMES: readonly string[] = [
   "contract",
   "duration_ms",
   "error",
+  "error_code",
   "ok",
   "text",
   "truncated",
@@ -148,6 +168,10 @@ export function issueReason(issues: readonly { code: string }[]): ContractReason
     }
   }
   return "invalid_body";
+}
+
+function isToolErrorCode(value: string): value is ToolErrorCode {
+  return (TOOL_ERROR_CODES as readonly string[]).includes(value);
 }
 
 function isToolErrorText(value: string): boolean {

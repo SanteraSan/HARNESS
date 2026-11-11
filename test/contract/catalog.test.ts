@@ -13,7 +13,7 @@ import {
 } from "../../contract/index.js";
 
 const CONTRACT_ROOT = fileURLToPath(new URL("../../contract/", import.meta.url));
-const FORBIDDEN_PARAMETER_KEYS = ["pattern", "$ref", "$data", "allOf", "items"];
+const FORBIDDEN_PARAMETER_KEYS = ["pattern", "$ref", "$data", "allOf", "items", "maxItems"];
 
 async function readJson(relative: string): Promise<unknown> {
   return JSON.parse(await readFile(path.join(CONTRACT_ROOT, relative), "utf8")) as unknown;
@@ -56,6 +56,7 @@ describe("contract catalog", () => {
     for (const tool of HUB_TOOLS) {
       const document = await readJson(`tools/${tool.name}.json`);
       expect(own(document, "name")).toBe(tool.name);
+      expect(own(document, "version")).toBe(tool.version);
       expect(own(document, "effect")).toBe(tool.effect);
       expect(own(document, "description")).toBe(tool.description);
       expect(own(document, "accepts_blobs")).toBe(false);
@@ -76,6 +77,53 @@ describe("contract catalog", () => {
       "path",
       "text",
     ]);
+    expect(own(own(own(note, "parameters"), "properties"), "idempotency_key")).toBeUndefined();
+  });
+
+  it("должен совпадать с записью примера манифеста", async () => {
+    const example = await readJson("examples/services.json");
+    const services = own(example, "services");
+    if (!Array.isArray(services)) {
+      throw new Error("services");
+    }
+    const records: unknown[] = [];
+    for (const service of services) {
+      for (const item of unknownItems(own(service, "tools"))) {
+        records.push(item);
+      }
+    }
+    const names = records.map((record) => {
+      const name = own(record, "name");
+      if (typeof name !== "string") {
+        throw new Error("name");
+      }
+      return name;
+    });
+    const files = (await readdir(path.join(CONTRACT_ROOT, "tools")))
+      .filter((file) => file.endsWith(".json"))
+      .sort();
+    expect(files).toEqual(names.map((name) => `${name}.json`).sort());
+    for (const record of records) {
+      const name = own(record, "name");
+      if (typeof name !== "string") {
+        throw new Error("name");
+      }
+      const review = await readJson(`tools/${name}.json`);
+      expect(withoutCall(review)).toEqual(record);
+    }
+  });
+
+  it("должен прямо назвать localhost, кодпоинты и отсутствие blobs_url", async () => {
+    const readme = await readFile(path.join(CONTRACT_ROOT, "README.md"), "utf8");
+    const spec = await readFile(
+      fileURLToPath(new URL("../../docs/spec/02-contract.md", import.meta.url)),
+      "utf8",
+    );
+    for (const text of [readme, spec]) {
+      expect(text.includes("нужен http://127.0.0.1, не localhost")).toBe(true);
+      expect(text.includes("UTF-16")).toBe(true);
+      expect(text.includes("blobs_url")).toBe(true);
+    }
   });
 
   it("должен не содержать значений Authorization и не входить в воркер", async () => {
@@ -115,6 +163,36 @@ describe("contract catalog", () => {
     expect(sorted.value.text.includes('"n":0')).toBe(true);
   });
 });
+
+function unknownItems(value: unknown): readonly unknown[] {
+  if (!Array.isArray(value)) {
+    throw new Error("tools");
+  }
+  const items: unknown[] = [];
+  for (const item of value as readonly unknown[]) {
+    items.push(item);
+  }
+  return items;
+}
+
+function withoutCall(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("tool review is invalid");
+  }
+  const copy: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) {
+    if (key === "call") {
+      continue;
+    }
+    Object.defineProperty(copy, key, {
+      configurable: true,
+      enumerable: true,
+      value: own(value, key),
+      writable: true,
+    });
+  }
+  return copy;
+}
 
 async function listFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });

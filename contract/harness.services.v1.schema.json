@@ -21,7 +21,7 @@
     "service": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "base_url", "tools"],
+      "required": ["id", "base_url", "auth", "tools"],
       "properties": {
         "id": {
           "type": "string",
@@ -48,7 +48,10 @@
               "pattern": "^https://(?:192\\.168\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])|192\\.168\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5]):(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))/?$"
             }
           ],
-          "description": "Литерал IPv4 без userinfo, query и fragment. Путь пустой или /. http только для 127.0.0.1. Иной частный адрес — https и tls_fingerprint256. 0.0.0.0, имя DNS и IPv6 не подходят."
+          "description": "Литерал IPv4 без userinfo, query и fragment. Путь пустой или /. http только для 127.0.0.1. Иной частный адрес — https и tls_fingerprint256. 0.0.0.0, имя DNS и IPv6 не подходят. localhost не подходит: нужен http://127.0.0.1, не localhost."
+        },
+        "auth": {
+          "$ref": "#/$defs/auth"
         },
         "tls_fingerprint256": {
           "type": "string",
@@ -78,19 +81,76 @@
           "else": {
             "required": ["tls_fingerprint256"]
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "auth": {
+                "type": "object",
+                "properties": {
+                  "type": { "const": "none" }
+                },
+                "required": ["type"]
+              }
+            },
+            "required": ["auth"]
+          },
+          "then": {
+            "properties": {
+              "base_url": {
+                "pattern": "^http://127\\.0\\.0\\.1:(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])/?$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "unevaluatedProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": ["bearer", "none"],
+          "description": "hmac нет. none только для http://127.0.0.1 с портом."
+        },
+        "env": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Z_][A-Z0-9_]{0,127}$",
+          "description": "Имя переменной окружения, не значение секрета."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": { "const": "bearer" }
+            },
+            "required": ["type"]
+          },
+          "then": { "required": ["env"] },
+          "else": { "not": { "required": ["env"] } }
         }
       ]
     },
     "tool": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "effect", "description", "accepts_blobs", "parameters"],
+      "required": ["name", "version", "effect", "description", "accepts_blobs", "parameters"],
       "properties": {
         "name": {
           "type": "string",
           "minLength": 1,
           "maxLength": 64,
-          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+          "pattern": "^[A-Za-z0-9_-]{1,64}$",
+          "description": "Имя для модели. Текущие инструменты не задают отдельное поле и не называются files.read_file."
+        },
+        "version": {
+          "const": "1",
+          "description": "Хаб принимает только эту строку. Неизвестную версию не игнорирует и не подменяет последней."
         },
         "effect": {
           "enum": ["read", "write"]
@@ -124,7 +184,7 @@
       "additionalProperties": false,
       "unevaluatedProperties": false,
       "required": ["type"],
-      "description": "Файл оператора принимает только type, properties, required, additionalProperties, maxLength, minLength, enum, maxItems. pattern, $ref, $data, allOf и items файл бракуют. У объекта additionalProperties равен false. Имя из required есть в properties. Значение enum совпадает с type. minLength не больше maxLength. Вложенность properties не глубже 8. Хаб этот документ не компилирует.",
+      "description": "Файл оператора принимает только type, properties, required, additionalProperties, maxLength, minLength, enum. Массива в параметрах нет: items запрещён, maxItems не используется, string[] нет. Несколько значений идут строкой или blob. pattern, $ref, $data, allOf и items файл бракуют. У объекта additionalProperties равен false. Имя из required есть в properties. Значение enum совпадает с type. minLength не больше maxLength. Длины — кодпоинты. Вложенность properties не глубже 8. Хаб этот документ не компилирует.",
       "properties": {
         "type": {
           "enum": ["object", "string", "integer", "number", "boolean"]
@@ -167,11 +227,6 @@
           "type": "array",
           "minItems": 1,
           "maxItems": 32
-        },
-        "maxItems": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 32
         }
       },
       "allOf": [

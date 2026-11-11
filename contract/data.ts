@@ -82,6 +82,12 @@ export function codePointLength(value: string): number {
   return count;
 }
 
+/** Потолок JSON Schema maxLength: кодпоинты, не String.length. */
+export function isCodePointBounded(value: string, min: number, max: number): boolean {
+  const length = codePointLength(value);
+  return length >= min && length <= max;
+}
+
 /** Управляющие символы, включая перевод строки: в error стек не помещается. */
 export function hasControlCharacter(value: string): boolean {
   for (let index = 0; index < value.length;) {
