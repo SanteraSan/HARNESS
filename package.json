@@ -15,7 +15,8 @@
     "worker": "node --env-file=.env --import tsx src/worker.ts",
     "telegram": "node --env-file=.env --import tsx src/telegram/index.ts",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepare": "husky"
   },
   "dependencies": {
     "grammy": "1.46.0",
@@ -29,6 +30,7 @@
     "@vitest/coverage-v8": "5.1.0",
     "eslint": "9.39.5",
     "eslint-plugin-security": "4.2.1",
+    "husky": "9.1.7",
     "prettier": "3.9.10",
     "tsx": "4.23.15",
     "typescript": "6.0.3",

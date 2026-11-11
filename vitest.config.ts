@@ -9,7 +9,7 @@ export default defineConfig({
     testTimeout: 20_000,
     hookTimeout: 20_000,
     coverage: {
-      all: true,
+      // Vitest 5 не принимает coverage.all: непокрытые файлы задаёт include.
       provider: "v8",
       reporter: ["lcovonly"],
       reportsDirectory: "coverage",

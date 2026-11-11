@@ -1,4 +1,5 @@
 # Четыре job по порядку: tests → sonar → trivy → build.
+# branch-flow от этой цепочки не зависит и на push пропускается.
 # SonarQube Community Build не анализирует pull request и не принимает несколько веток
 # одного проекта, поэтому job sonar только на push, в проект harness-<ветка>.
 # На pull request этого репозитория sonar skipped и не падает; trivy и build идут
@@ -74,7 +75,10 @@ jobs:
         with:
           node-version: "22"
 
+      # HUSKY=0: prepare не ставит хуки на раннере и не подменяет ворота.
       - name: npm ci
+        env:
+          HUSKY: "0"
         run: npm ci
 
       # Один прогон vitest с покрытием. lcov нужен сканеру и в git не входит.
@@ -326,8 +330,54 @@ jobs:
         with:
           node-version: "22"
 
+      # HUSKY=0: prepare не ставит хуки на раннере и не подменяет ворота.
       - name: npm ci
+        env:
+          HUSKY: "0"
         run: npm ci
 
       - name: tsc --noEmit
         run: ./node_modules/.bin/tsc --noEmit
+
+  # Голова pull request: dev принимает любую ветку этого репозитория,
+  # stage — только dev, prod — только stage. Форк и чужая база падают.
+  # Секретов нет. На push job пропускается и не входит в проверки push.
+  branch-flow:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Допустимая голова
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "$HEAD_REPO" != "$THIS_REPO" ]]; then
+            echo "Форк: голова из другого репозитория" >&2
+            exit 1
+          fi
+          case "$BASE_REF" in
+            dev)
+              ;;
+            stage)
+              if [[ "$HEAD_REF" != "dev" ]]; then
+                echo "В stage входит только dev" >&2
+                exit 1
+              fi
+              ;;
+            prod)
+              if [[ "$HEAD_REF" != "stage" ]]; then
+                echo "В prod входит только stage" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "База вне dev, stage, prod" >&2
+              exit 1
+              ;;
+          esac
+          echo "Голова ${HEAD_REF} допускается в ${BASE_REF}"
