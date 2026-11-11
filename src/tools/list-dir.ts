@@ -8,6 +8,9 @@ import type { DirectoryEntry, Tool, ToolContext, ToolOutcome } from "../contract
 import { resolveInsideRoot } from "./path-jail.js";
 import { runTool } from "./run.js";
 
+/** Потолок текста сервиса: следующий элемент сверх этого числа кодпоинтов не добавляется. */
+const LIST_DIR_TEXT_CODE_POINTS = 8000;
+
 const listDirParameters = z.object({
   path: z
     .string()
@@ -20,7 +23,7 @@ const listDirParameters = z.object({
 export const listDirTool: Tool = {
   name: "list_dir",
   description:
-    "Показывает один уровень каталога: имя и признак каталога. Во вложенные каталоги не спускается.",
+    "Показывает один уровень каталога: имя и признак каталога. Во вложенные каталоги не спускается. Имена добавляются, пока следующее не превысит 8000 кодпоинтов; иначе список обрезан.",
   effect: "read",
   parameters: listDirParameters,
   execute(args: unknown, ctx: ToolContext): Promise<ToolOutcome> {
@@ -37,17 +40,48 @@ export const listDirTool: Tool = {
         entries.push({ name: dirent.name, isDirectory: dirent.isDirectory() });
       }
       entries.sort((left, right) => compareNames(left.name, right.name));
-      return { ok: true, text: listingText(entries), truncated: false, entries };
+      const bounded = boundListing(entries);
+      return {
+        ok: true,
+        text: bounded.text,
+        truncated: bounded.truncated,
+        entries: bounded.entries,
+      };
     });
   },
 };
 
-function listingText(entries: readonly DirectoryEntry[]): string {
-  const lines: string[] = [];
+/**
+ * Добавляет имена, пока следующий элемент не превысит 8000 кодпоинтов.
+ * Пустой каталог — пустой текст и truncated false. Имя посередине не режется.
+ */
+function boundListing(entries: readonly DirectoryEntry[]): {
+  text: string;
+  truncated: boolean;
+  entries: DirectoryEntry[];
+} {
+  const kept: DirectoryEntry[] = [];
+  let text = "";
   for (const entry of entries) {
-    lines.push(entry.isDirectory ? `${entry.name}/` : entry.name);
+    const line = entry.isDirectory ? `${entry.name}/` : entry.name;
+    const next = text.length === 0 ? line : `${text}\n${line}`;
+    if (codePointCount(next) > LIST_DIR_TEXT_CODE_POINTS) {
+      return { text, truncated: true, entries: kept };
+    }
+    text = next;
+    kept.push(entry);
   }
-  return lines.join("\n");
+  return { text, truncated: false, entries: kept };
+}
+
+function codePointCount(value: string): number {
+  let count = 0;
+  for (let index = 0; index < value.length;) {
+    const code = value.codePointAt(index);
+    count += 1;
+    index += code !== undefined && code > 0xffff ? 2 : 1;
+  }
+  return count;
 }
 
 function compareNames(left: string, right: string): number {

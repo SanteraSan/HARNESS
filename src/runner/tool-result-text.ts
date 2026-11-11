@@ -2,13 +2,19 @@ import { z } from "zod";
 
 /**
  * Текст роли tool, который модель увидит следующим ходом.
- * Сырой JSON, заголовки и тело ошибки сюда не входят: функция их не возвращает.
+ * Сырой JSON и заголовки сюда не входят.
+ * При ok false в роль tool идёт строка error после той же подготовки, что и text.
  * Вызовы внутри текста не разбираются. redact эта функция не делает:
  * раннер вызывает его после подготовки, до журнала и до следующего хода.
  */
 export const MODEL_TOOL_TEXT_CHARS = 8000;
 
-const SERVICE_BODY_LIMIT_BYTES = 32 * 1024;
+/**
+ * Потолок тела ответа сервиса. Совпадает с RESPONSE_BODY_LIMIT_BYTES:
+ * худший JSON текста файла в 64 КиБ плюс конверт. Тело принимается целиком,
+ * prepareToolResultText режет модель до 8000 кодпоинтов.
+ */
+export const SERVICE_RESPONSE_BODY_BYTES = 393_627;
 
 const SERVICE_TEXT_MAX_CODE_POINTS = 65_536;
 
@@ -23,7 +29,7 @@ const SCAN_DEPTH_MAX = 32;
 export const SERVICE_CONTRACT_VERSION = "harness.tool.v1";
 
 export type ServiceRejection =
-  "unknown_field" | "unsupported_version" | "payload_too_large" | "invalid_body" | "tool_error";
+  "unknown_field" | "unsupported_version" | "payload_too_large" | "invalid_body";
 
 export type PreparedToolText = { ok: true; text: string } | { ok: false; reason: ServiceRejection };
 
@@ -51,6 +57,7 @@ const failureSchema = z
     contract: z.literal(SERVICE_CONTRACT_VERSION),
     ok: z.literal(false),
     error: z.string().refine((value) => isServiceErrorText(value)),
+    error_code: z.string(),
     truncated: z.boolean(),
     duration_ms: z.number().int().min(0).max(SERVICE_DURATION_MAX_MS),
     blobs: z.array(blobIdSchema).max(0),
@@ -66,7 +73,8 @@ interface Cursor {
 /**
  * Готовит текст для роли tool.
  * `source: "tool"` — уже отделённый текст read_file, list_dir и любого локального результата.
- * `source: "service"` — тело ответа сервиса: в модель попадает только проверенное поле text.
+ * `source: "service"` — тело ответа сервиса: при ok true в модель попадает поле text,
+ * при ok false — строка error. Оба проходят prepareToolResultText. Сырой JSON не возвращается.
  */
 export function prepareToolResultForModel(input: { source: "tool"; text: string }): {
   ok: true;
@@ -102,7 +110,7 @@ export function prepareToolResultText(text: string): string {
 }
 
 function serviceTextForModel(raw: string): PreparedToolText {
-  if (Buffer.byteLength(raw, "utf8") > SERVICE_BODY_LIMIT_BYTES) {
+  if (Buffer.byteLength(raw, "utf8") > SERVICE_RESPONSE_BODY_BYTES) {
     return { ok: false, reason: "payload_too_large" };
   }
   // Повтор ключа склеился бы в JSON.parse, и второе text подменило бы первое.
@@ -133,8 +141,7 @@ function serviceTextForModel(raw: string): PreparedToolText {
     return { ok: false, reason: issueReason(parsed.error.issues) };
   }
   if (parsed.data.ok === false) {
-    // Поле error проверено схемой и в результат не копируется: это не текст для модели.
-    return { ok: false, reason: "tool_error" };
+    return { ok: true, text: prepareToolResultText(parsed.data.error) };
   }
   return { ok: true, text: prepareToolResultText(parsed.data.text) };
 }
