@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   CONTRACT_VERSION,
+  JSON_BODY_LIMIT_BYTES,
   MODEL_TOOL_TEXT_CHARS,
   RECORD_NOTE_TEXT_MAX,
+  TOOL_PATH_MAX,
+  canonicalBody,
   clipModelText,
   compareIdempotency,
+  fitListDirLines,
   formatIdempotencyKey,
   omitIdempotencyArgument,
   parseToolArguments,
@@ -28,6 +32,26 @@ function callBody(name: string, args: unknown, toolCallId = CALL_ID): string {
     name,
     arguments: args,
   });
+}
+
+function noteBody(service: string, toolCallId: string, path: string, text: string): string {
+  return mustCanonical({
+    agent_id: AGENT_ID,
+    arguments: { path, text },
+    contract: CONTRACT_VERSION,
+    name: "record_note",
+    run_id: RUN_ID,
+    service,
+    tool_call_id: toolCallId,
+  });
+}
+
+function mustCanonical(value: unknown): string {
+  const canonical = canonicalBody(value);
+  if (!canonical.ok) {
+    throw new Error("canonical body");
+  }
+  return canonical.value.text;
 }
 
 function input(body: string, pathName: string, idempotencyKey: string | null) {
@@ -92,6 +116,24 @@ describe("tool arguments", () => {
     expect(parseToolArguments("record_note", { path: "out/a.txt", text: `${text}🙂` })).toEqual({
       ok: false,
       reason: "invalid_body",
+    });
+  });
+
+  it("должен пропустить максимальную заметку из кавычек и отвергнуть на один кодпоинт длиннее", () => {
+    const service = "a".repeat(64);
+    const toolCallId = "A".repeat(128);
+    const path = '"'.repeat(TOOL_PATH_MAX);
+    const text = '"'.repeat(RECORD_NOTE_TEXT_MAX);
+    const key = `"${RUN_ID}:${toolCallId}"`;
+    const fitting = noteBody(service, toolCallId, path, text);
+    expect(Buffer.byteLength(fitting, "utf8")).toBe(JSON_BODY_LIMIT_BYTES);
+    expect(parseToolCall(input(fitting, "record_note", key)).ok).toBe(true);
+
+    const longer = noteBody(service, toolCallId, path, `${text}"`);
+    expect(Buffer.byteLength(longer, "utf8")).toBe(JSON_BODY_LIMIT_BYTES + 2);
+    expect(parseToolCall(input(longer, "record_note", key))).toEqual({
+      ok: false,
+      reason: "payload_too_large",
     });
   });
 
@@ -342,6 +384,38 @@ describe("compareIdempotency", () => {
         },
       }),
     ).toEqual({ kind: "in_progress", status: 409, reason: "idempotency_in_progress" });
+  });
+});
+
+describe("fitListDirLines", () => {
+  it("должен оставить пустой каталог без обрезки", () => {
+    expect(fitListDirLines([])).toEqual({ text: "", truncated: false });
+  });
+
+  it("должен остановиться перед элементом, который превысит 8000 кодпоинтов", () => {
+    const line = "n".repeat(200);
+    const fitted = fitListDirLines(Array.from({ length: 40 }, () => line));
+    expect(fitted.truncated).toBe(true);
+    const kept = fitted.text.length === 0 ? [] : fitted.text.split("\n");
+    expect(kept).toHaveLength(39);
+    expect([...fitted.text].length).toBeLessThanOrEqual(MODEL_TOOL_TEXT_CHARS);
+    expect([...`${fitted.text}\n${line}`].length).toBeGreaterThan(MODEL_TOOL_TEXT_CHARS);
+    expect(fitted.text.endsWith(line.slice(0, 10))).toBe(true);
+  });
+
+  it("должен не резать имя посередине", () => {
+    expect(fitListDirLines(["a".repeat(MODEL_TOOL_TEXT_CHARS + 1)])).toEqual({
+      text: "",
+      truncated: true,
+    });
+    expect(fitListDirLines(["a".repeat(MODEL_TOOL_TEXT_CHARS)])).toEqual({
+      text: "a".repeat(MODEL_TOOL_TEXT_CHARS),
+      truncated: false,
+    });
+    expect(fitListDirLines(["a".repeat(MODEL_TOOL_TEXT_CHARS), "b"])).toEqual({
+      text: "a".repeat(MODEL_TOOL_TEXT_CHARS),
+      truncated: true,
+    });
   });
 });
 

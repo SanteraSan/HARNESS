@@ -9,6 +9,7 @@ import {
   MODEL_TOOL_TEXT_CHARS,
   RESPONSE_BODY_LIMIT_BYTES,
   RESPONSE_TEXT_MAX_CODE_POINTS,
+  canonicalBody,
   clipModelText,
   codePointLength,
   parseServicesManifest,
@@ -86,6 +87,45 @@ describe("schema and parser agreement", () => {
       reason: "payload_too_large",
     });
     expect(parseToolRequest(" ".repeat(JSON_BODY_LIMIT_BYTES + 1))).toEqual({
+      ok: false,
+      reason: "payload_too_large",
+    });
+  });
+
+  it("должен вместить худший JSON текста файла в 64 КиБ и отвергнуть лишний байт", () => {
+    const blobs = [
+      "00000000-0000-4000-8000-0000000000b0",
+      "00000000-0000-4000-8000-0000000000b1",
+      "00000000-0000-4000-8000-0000000000b2",
+      "00000000-0000-4000-8000-0000000000b3",
+      "00000000-0000-4000-8000-0000000000b4",
+      "00000000-0000-4000-8000-0000000000b5",
+      "00000000-0000-4000-8000-0000000000b6",
+      "00000000-0000-4000-8000-0000000000b7",
+    ];
+    const canonical = canonicalBody({
+      blobs,
+      contract: CONTRACT_VERSION,
+      duration_ms: 600000,
+      ok: true,
+      text: "\u0001".repeat(RESPONSE_TEXT_MAX_CODE_POINTS),
+      truncated: false,
+    });
+    expect(canonical.ok).toBe(true);
+    if (!canonical.ok) {
+      return;
+    }
+    expect(Buffer.byteLength(canonical.value.text, "utf8")).toBe(RESPONSE_BODY_LIMIT_BYTES);
+    const parsed = parseToolResponse(canonical.value.text);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok || parsed.value.ok !== true) {
+      return;
+    }
+    expect(codePointLength(parsed.value.text)).toBe(RESPONSE_TEXT_MAX_CODE_POINTS);
+    const clipped = clipModelText(parsed.value.text);
+    expect(codePointLength(clipped.text)).toBe(MODEL_TOOL_TEXT_CHARS);
+    expect(clipped.clipped).toBe(true);
+    expect(parseToolResponse(`${canonical.value.text} `)).toEqual({
       ok: false,
       reason: "payload_too_large",
     });
