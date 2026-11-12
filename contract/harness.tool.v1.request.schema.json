@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "harness.tool.v1.request.schema.json",
+  "title": "harness.tool.v1 request",
+  "type": "object",
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "required": ["contract", "run_id", "tool_call_id", "agent_id", "service", "name", "arguments"],
+  "properties": {
+    "contract": { "const": "harness.tool.v1" },
+    "run_id": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "uuid в нижнем регистре"
+    },
+    "tool_call_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]{1,128}$",
+      "description": "1..128 символов из A-Z, a-z, 0-9, _ и -"
+    },
+    "agent_id": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "uuid в нижнем регистре"
+    },
+    "service": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+      "description": "Короткое имя сервиса. Тот же алфавит, что id в манифесте. Имя инструмента для модели остаётся name."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]{1,64}$",
+      "description": "Имя для модели: read_file, list_dir, record_note. Не files.read_file."
+    },
+    "arguments": {
+      "type": "object",
+      "description": "Объект. Точка входа снимает idempotency_key и только потом строго проверяет схемой инструмента."
+    }
+  }
+}

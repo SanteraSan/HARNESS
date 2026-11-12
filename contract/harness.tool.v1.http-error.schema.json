@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "harness.tool.v1.http-error.schema.json",
+  "title": "harness.tool.v1 http error",
+  "type": "object",
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "required": ["reason"],
+  "properties": {
+    "reason": {
+      "enum": [
+        "invalid_body",
+        "unknown_field",
+        "unsupported_version",
+        "unauthorized",
+        "unknown_tool",
+        "idempotency_conflict",
+        "idempotency_in_progress",
+        "payload_too_large"
+      ]
+    }
+  }
+}

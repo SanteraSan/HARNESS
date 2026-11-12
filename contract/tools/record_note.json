@@ -1,0 +1,21 @@
+{
+  "name": "record_note",
+  "version": "1",
+  "effect": "write",
+  "description": "Записывает текстовый файл в каталог out. Повтор с тем же ключом идемпотентности возвращает первый результат и не создаёт второй файл.",
+  "accepts_blobs": false,
+  "call": {
+    "method": "POST",
+    "path": "/v1/tools/record_note",
+    "idempotency": "required"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["path", "text"],
+    "properties": {
+      "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+      "text": { "type": "string", "minLength": 1, "maxLength": 32768 }
+    }
+  }
+}

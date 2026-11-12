@@ -1,0 +1,9 @@
+{
+  "contract": "harness.tool.v1",
+  "ok": false,
+  "error": "path escapes root",
+  "error_code": "forbidden",
+  "truncated": false,
+  "duration_ms": 2,
+  "blobs": []
+}

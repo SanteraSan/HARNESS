@@ -1,0 +1,8 @@
+{
+  "contract": "harness.tool.v1",
+  "ok": true,
+  "text": "notes/a.txt",
+  "truncated": false,
+  "duration_ms": 4,
+  "blobs": []
+}

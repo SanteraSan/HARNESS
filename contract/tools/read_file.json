@@ -1,0 +1,20 @@
+{
+  "name": "read_file",
+  "version": "1",
+  "effect": "read",
+  "description": "Читает текстовый файл UTF-8 внутри рабочего каталога. Каталог, бинарные данные и путь снаружи корня — ошибка.",
+  "accepts_blobs": false,
+  "call": {
+    "method": "POST",
+    "path": "/v1/tools/read_file",
+    "idempotency": "optional"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["path"],
+    "properties": {
+      "path": { "type": "string", "minLength": 1, "maxLength": 4096 }
+    }
+  }
+}

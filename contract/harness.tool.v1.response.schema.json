@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "harness.tool.v1.response.schema.json",
+  "title": "harness.tool.v1 response",
+  "type": "object",
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "required": ["contract", "ok", "truncated", "duration_ms", "blobs"],
+  "properties": {
+    "contract": { "const": "harness.tool.v1" },
+    "ok": { "type": "boolean" },
+    "truncated": { "type": "boolean" },
+    "duration_ms": { "type": "integer", "minimum": 0, "maximum": 600000 },
+    "blobs": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "description": "Id принадлежат хабу. Сервис сначала отдаёт байты хабу и возвращает его id. GET блоба на base_url сервиса нет, поля blobs_url нет.",
+      "items": {
+        "type": "string",
+        "minLength": 36,
+        "maxLength": 36,
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "description": "uuid в нижнем регистре, выпущенный хабом"
+      }
+    },
+    "text": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "До 65536 кодпоинтов. В модель после разбора входит не больше 8000: это подготовка текста, не отказ ответа."
+    },
+    "error": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[^\\u0000-\\u001F\\u007F\\u0080-\\u009F]*$",
+      "description": "Человеческая строка. Потолок длины один: maxLength в кодпоинтах. Паттерн не задаёт второй потолок. Без U+0000–U+001F, U+007F и U+0080–U+009F."
+    },
+    "error_code": {
+      "enum": [
+        "invalid_args",
+        "not_found",
+        "forbidden",
+        "too_large",
+        "conflict",
+        "unavailable",
+        "internal"
+      ],
+      "description": "Закрытый набор. path_escape нет. Разбор хаба неизвестную строку заменяет на internal."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "ok": { "const": true } },
+        "required": ["ok"]
+      },
+      "then": {
+        "required": ["text"],
+        "not": {
+          "anyOf": [{ "required": ["error"] }, { "required": ["error_code"] }]
+        }
+      },
+      "else": {
+        "required": ["error", "error_code"],
+        "not": { "required": ["text"] },
+        "properties": {
+          "blobs": { "maxItems": 0 }
+        }
+      }
+    }
+  ]
+}

@@ -13,7 +13,7 @@ export default defineConfig({
       provider: "v8",
       reporter: ["lcovonly"],
       reportsDirectory: "coverage",
-      include: ["src/**/*.ts"],
+      include: ["src/**/*.ts", "contract/**/*.ts"],
     },
   },
 });

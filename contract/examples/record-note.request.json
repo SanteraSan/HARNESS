@@ -1,0 +1,9 @@
+{
+  "contract": "harness.tool.v1",
+  "run_id": "00000000-0000-4000-8000-000000000010",
+  "tool_call_id": "call_1",
+  "agent_id": "00000000-0000-4000-8000-000000000001",
+  "service": "files",
+  "name": "record_note",
+  "arguments": { "path": "out/a.txt", "text": "note" }
+}
