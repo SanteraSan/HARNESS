@@ -4,8 +4,9 @@ import { z } from "zod";
  * Текст роли tool, который модель увидит следующим ходом.
  * Сырой JSON и заголовки сюда не входят.
  * При ok false в роль tool идёт строка error после той же подготовки, что и text.
- * Вызовы внутри текста не разбираются. redact эта функция не делает:
- * раннер вызывает его после подготовки, до журнала и до следующего хода.
+ * Вызовы внутри текста не разбираются.
+ * Скрытые символы снимаются с полного текста, затем redact вызывающего,
+ * и только потом хвост режется до 8000 кодпоинтов.
  */
 export const MODEL_TOOL_TEXT_CHARS = 8000;
 
@@ -74,32 +75,64 @@ interface Cursor {
  * Готовит текст для роли tool.
  * `source: "tool"` — уже отделённый текст read_file, list_dir и любого локального результата.
  * `source: "service"` — тело ответа сервиса: при ok true в модель попадает поле text,
- * при ok false — строка error. Оба проходят prepareToolResultText. Сырой JSON не возвращается.
+ * при ok false — строка error. Оба проходят одну подготовку. Сырой JSON не возвращается.
+ * `redactText` вызывается после снятия скрытых символов и до обрезки.
  */
-export function prepareToolResultForModel(input: { source: "tool"; text: string }): {
+export function prepareToolResultForModel(
+  input: { source: "tool"; text: string },
+  redactText?: (value: string) => string,
+): {
   ok: true;
   text: string;
 };
-export function prepareToolResultForModel(input: {
-  source: "service";
-  body: string;
-}): PreparedToolText;
-export function prepareToolResultForModel(input: ToolResultInput): PreparedToolText {
+export function prepareToolResultForModel(
+  input: {
+    source: "service";
+    body: string;
+  },
+  redactText?: (value: string) => string,
+): PreparedToolText;
+export function prepareToolResultForModel(
+  input: ToolResultInput,
+  redactText?: (value: string) => string,
+): PreparedToolText {
   if (input.source === "tool") {
-    return { ok: true, text: prepareToolResultText(input.text) };
+    return { ok: true, text: textForModel(input.text, redactText) };
   }
-  return serviceTextForModel(input.body);
+  return serviceTextForModel(input.body, redactText);
 }
 
 /** Режет скрытые символы и хвост. Обычные буквы, цифры, таб и перевод строки оставляет. */
 export function prepareToolResultText(text: string): string {
+  return textForModel(text);
+}
+
+/**
+ * Обрезка до redact оставляет префикс секрета, который начинается до 8000-й границы.
+ * Скрытый символ внутри секрета снимается раньше, иначе маска его не видит.
+ */
+function textForModel(text: string, redactText?: (value: string) => string): string {
+  const stripped = stripToolResultControls(text);
+  const masked = redactText === undefined ? stripped : redactText(stripped);
+  return clipToolResultText(masked);
+}
+
+function stripToolResultControls(text: string): string {
   let result = "";
-  let count = 0;
   for (const character of text) {
     const code = character.codePointAt(0);
     if (code === undefined || isHiddenCodePoint(code)) {
       continue;
     }
+    result += character;
+  }
+  return result;
+}
+
+function clipToolResultText(text: string): string {
+  let result = "";
+  let count = 0;
+  for (const character of text) {
     if (count === MODEL_TOOL_TEXT_CHARS) {
       break;
     }
@@ -109,7 +142,10 @@ export function prepareToolResultText(text: string): string {
   return result;
 }
 
-function serviceTextForModel(raw: string): PreparedToolText {
+function serviceTextForModel(
+  raw: string,
+  redactText?: (value: string) => string,
+): PreparedToolText {
   if (Buffer.byteLength(raw, "utf8") > SERVICE_RESPONSE_BODY_BYTES) {
     return { ok: false, reason: "payload_too_large" };
   }
@@ -141,9 +177,9 @@ function serviceTextForModel(raw: string): PreparedToolText {
     return { ok: false, reason: issueReason(parsed.error.issues) };
   }
   if (parsed.data.ok === false) {
-    return { ok: true, text: prepareToolResultText(parsed.data.error) };
+    return { ok: true, text: textForModel(parsed.data.error, redactText) };
   }
-  return { ok: true, text: prepareToolResultText(parsed.data.text) };
+  return { ok: true, text: textForModel(parsed.data.text, redactText) };
 }
 
 function foreignContract(value: object): boolean {

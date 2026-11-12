@@ -20,6 +20,7 @@ import type {
 } from "../../src/contracts/index.js";
 import { REDACTED } from "../../src/model/redact.js";
 import { OpenAICompatRunner, type RunnerAgent } from "../../src/runner/index.js";
+import { MODEL_TOOL_TEXT_CHARS } from "../../src/runner/tool-result-text.js";
 import { modelToolsForAllowlist } from "../../src/tools/index.js";
 
 const WORKER_ID = "worker-1";
@@ -549,6 +550,36 @@ describe("OpenAICompatRunner", () => {
     expect(result.steps.find((step) => step.kind === "tool_result")?.responseExcerpt).toBe(
       `token ${REDACTED} end`,
     );
+  });
+
+  it("должен убрать секрет, разрезанный границей 8000, из следующего хода и из шага", async () => {
+    const overlap = 12;
+    const leakedPrefix = listedSecret.slice(0, overlap);
+    const filler = "я".repeat(MODEL_TOOL_TEXT_CHARS - overlap);
+    const text = `${filler}${listedSecret}хвост`;
+    const tool = fakeTool("read_file", () => Promise.resolve(okText(text)));
+    const result = await runScenario({
+      message: "прочитай",
+      agent: { toolAllowlist: ["read_file"] },
+      tools: [tool],
+      secrets: [listedSecret],
+      outputs: [
+        toolCallOutput([{ id: "c1", name: "read_file", arguments: '{"path":"a.txt"}' }]),
+        textOutput("готово"),
+      ],
+    });
+
+    const content =
+      result.inputs[1]?.messages.find((entry) => entry.role === "tool")?.content ?? "";
+    const excerpt = result.steps.find((step) => step.kind === "tool_result")?.responseExcerpt ?? "";
+    expect(filler.length + listedSecret.length).toBeGreaterThan(MODEL_TOOL_TEXT_CHARS);
+    expect(content.startsWith(filler)).toBe(true);
+    expect(content).toContain(REDACTED);
+    expect(content).not.toContain(listedSecret);
+    expect(content).not.toContain(leakedPrefix);
+    expect(excerpt).toBe(content);
+    expect(JSON.stringify(result.inputs[1])).not.toContain(listedSecret);
+    expect(JSON.stringify(result.inputs[1])).not.toContain(leakedPrefix);
   });
 });
 
