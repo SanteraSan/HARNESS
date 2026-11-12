@@ -46,6 +46,9 @@ export async function cleanTestDatabase(
   }
 
   await sql.begin(async (tx) => {
+    await tx`delete from service_model_steps`;
+    await tx`delete from service_results`;
+    await tx`delete from service_invocations`;
     await tx`update runs set parent_run_id = null`;
     await tx`delete from run_steps`;
     await tx`delete from runs`;

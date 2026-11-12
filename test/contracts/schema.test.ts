@@ -51,6 +51,7 @@ describe("migration 001", () => {
       "006_connector_secrets.sql",
       "007_chat_model.sql",
       "008_completion_limit.sql",
+      "012_service_reports.sql",
     ];
     expect(versions.map((row) => row.version)).toEqual(expectedVersions);
     expect(await listMigrationFiles(migrationsDirectory())).toEqual(expectedVersions);

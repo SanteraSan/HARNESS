@@ -1,8 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
-import { errorCode, isMainModule, loadConfig, logger } from "./config.js";
-import type { Config } from "./config.js";
+import { errorCode, isMainModule, loadConfig, logger, readServiceManifest } from "./config.js";
+import type { Config, ServiceManifestLoad } from "./config.js";
 import type {
   ChatModel,
   ClaimedRun,
@@ -23,6 +23,7 @@ import { ClaudeSdkRunner, unavailableClaudeSdkClient } from "./runner/claude-sdk
 import { OpenAICompatRunner, type RunnerAgent } from "./runner/index.js";
 import { type ChatModelAlias } from "./runner/openai-compat.js";
 import { resolveModel } from "./routing/resolve.js";
+import { createServiceCatalog, maintainServiceRows } from "./services/index.js";
 import { toolRegistry } from "./tools/index.js";
 
 /** Пустая очередь: одна секунда, затем снова reap и один захват. */
@@ -65,6 +66,8 @@ export interface WorkerLoopOptions {
   heartbeatSeconds: number;
   signal: AbortSignal;
   sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  /** После reap и до claim. Очередь этот модуль не импортирует. */
+  maintainServices?: () => Promise<void>;
 }
 
 export class WorkerError extends Error {
@@ -167,6 +170,9 @@ async function runIteration(options: WorkerLoopOptions, sleep: IdleSleep): Promi
   }
 
   await options.queue.reapExpired();
+  if (options.maintainServices !== undefined) {
+    await options.maintainServices();
+  }
   if (options.signal.aborted) {
     return false;
   }
@@ -526,14 +532,31 @@ export function createWorkerChatModel(options: {
   });
 }
 
-function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): WorkerLoopOptions {
-  const secrets = collectSecrets({
-    databaseUrl: config.databaseUrl,
-    harnessTestDatabaseUrl: config.harnessTestDatabaseUrl,
-    litellmApiKey: config.litellmApiKey,
-    harnessApiToken: config.harnessApiToken,
-    telegramBotToken: config.telegramBotToken,
-  });
+function workerLoopOptions(
+  config: Config,
+  sql: Sql,
+  signal: AbortSignal,
+  services: ServiceManifestLoad | null,
+): WorkerLoopOptions {
+  const secrets = [
+    ...collectSecrets({
+      databaseUrl: config.databaseUrl,
+      harnessTestDatabaseUrl: config.harnessTestDatabaseUrl,
+      litellmApiKey: config.litellmApiKey,
+      harnessApiToken: config.harnessApiToken,
+      telegramBotToken: config.telegramBotToken,
+    }),
+    ...(services?.redactSecrets ?? []),
+  ];
+  const catalog =
+    services === null
+      ? undefined
+      : createServiceCatalog({
+          sql,
+          manifest: services.manifest,
+          secretsByEnv: services.secretsByEnv,
+          redactSecrets: secrets,
+        });
   // Одна очередь процесса: дочерняя строка ждёт следующий захват этого воркера.
   const queue = createRunQueue(sql);
   const delegation = createDelegationTools({ sql, queue });
@@ -545,6 +568,7 @@ function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): Worke
     secrets,
     // Тот же пул процесса: правила и cost_usd не открывают второе соединение.
     sql,
+    services: catalog,
   });
   // Пакет SDK не установлен: клиент передаётся снаружи класса и живёт только для external.
   const sdkClient = unavailableClaudeSdkClient();
@@ -573,6 +597,9 @@ function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): Worke
     leaseSeconds: config.leaseSeconds,
     heartbeatSeconds: config.heartbeatSeconds,
     signal,
+    maintainServices(): Promise<void> {
+      return maintainServiceRows(sql);
+    },
   };
 }
 
@@ -599,6 +626,7 @@ function installProcessGuards(): void {
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  const services = await readServiceManifest(config);
   const sql = createSql(config.databaseUrl);
   await ensureFileRoot(config.fileRoot);
   const stop = new AbortController();
@@ -610,7 +638,7 @@ async function main(): Promise<void> {
   installProcessGuards();
   logger.info({ worker_id: config.workerId }, "worker started");
   try {
-    await runWorker(workerLoopOptions(config, sql, stop.signal));
+    await runWorker(workerLoopOptions(config, sql, stop.signal, services));
   } finally {
     await sql.end({ timeout: 5 });
   }
