@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { interpretModelOutput } from "../../src/contracts/interpret.js";
 import type { ModelOutput } from "../../src/contracts/types.js";
+import { REDACTED, redact } from "../../src/model/redact.js";
 import {
   MODEL_TOOL_TEXT_CHARS,
   SERVICE_CONTRACT_VERSION,
@@ -104,6 +105,55 @@ describe("prepareToolResultForModel", () => {
       body: successBody(`${"a".repeat(8000)}TAIL`),
     });
     expect(clipped).toEqual({ ok: true, text: "a".repeat(8000) });
+  });
+
+  it("должен замаскировать секрет целиком, если он начинается до границы 8000", () => {
+    const secret = "test-secret-value";
+    const overlap = 12;
+    const leakedPrefix = secret.slice(0, overlap);
+    const filler = "я".repeat(MODEL_TOOL_TEXT_CHARS - overlap);
+    const text = `${filler}${secret}хвост`;
+    const mask = (value: string): string => redact(value, [secret]);
+    const prepared = prepareToolResultForModel({ source: "tool", text }, mask);
+    const fromService = prepareToolResultForModel(
+      { source: "service", body: successBody(text) },
+      mask,
+    );
+
+    expect(filler.length).toBeLessThan(MODEL_TOOL_TEXT_CHARS);
+    expect(filler.length + secret.length).toBeGreaterThan(MODEL_TOOL_TEXT_CHARS);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) {
+      return;
+    }
+    expect(prepared.text.startsWith(filler)).toBe(true);
+    expect(prepared.text).toContain(REDACTED);
+    expect(prepared.text).not.toContain(secret);
+    expect(prepared.text).not.toContain(leakedPrefix);
+    expect([...prepared.text].length).toBe(MODEL_TOOL_TEXT_CHARS);
+    expect(fromService).toEqual(prepared);
+  });
+
+  it("должен снять скрытый символ до redact, если секрет пересекает границу 8000", () => {
+    const secret = "test-secret-value";
+    const overlap = 12;
+    const leakedPrefix = secret.slice(0, overlap);
+    const splitAt = secret.indexOf("-");
+    const hidden = `${secret.slice(0, splitAt)}\u200B${secret.slice(splitAt)}`;
+    const filler = "я".repeat(MODEL_TOOL_TEXT_CHARS - overlap);
+    const prepared = prepareToolResultForModel(
+      { source: "tool", text: `${filler}${hidden}хвост` },
+      (value) => redact(value, [secret]),
+    );
+
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) {
+      return;
+    }
+    expect(prepared.text).not.toContain("\u200B");
+    expect(prepared.text).not.toContain(secret);
+    expect(prepared.text).not.toContain(leakedPrefix);
+    expect(prepared.text).toContain(REDACTED);
   });
 
   it("должен отвергнуть чужую версию и не скопировать её текст", () => {

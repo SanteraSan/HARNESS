@@ -375,6 +375,33 @@ describe("schema and parser agreement", () => {
     expect(parseToolRequest(requestBody({})).ok).toBe(true);
   });
 
+  it("должен отвергнуть в blobs строку из 36 символов, которая не uuid", async () => {
+    const responseSchema = await readJson("harness.tool.v1.response.schema.json");
+    const requestSchema = await readJson("harness.tool.v1.request.schema.json");
+    const blobPattern = dig(responseSchema, ["properties", "blobs", "items", "pattern"]);
+    const runPattern = dig(requestSchema, ["properties", "run_id", "pattern"]);
+    expect(blobPattern).toBe(UUID_RE.source);
+    expect(blobPattern).toBe(runPattern);
+    if (typeof blobPattern !== "string") {
+      throw new Error("blobs pattern missing");
+    }
+
+    const notUuid = "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz";
+    const plain = "a".repeat(36);
+    const upper = RUN_ID.toUpperCase();
+    expect(notUuid).toHaveLength(36);
+    expect(plain).toHaveLength(36);
+    expect(upper).toHaveLength(36);
+    for (const id of [notUuid, plain, upper, RUN_ID]) {
+      const schemaOk = matchesSchemaPattern(blobPattern, id);
+      expect(parseToolResponse(responseWithBlobs([id])).ok).toBe(schemaOk);
+    }
+    expect(matchesSchemaPattern(blobPattern, notUuid)).toBe(false);
+    expect(parseToolResponse(responseWithBlobs([notUuid])).ok).toBe(false);
+    expect(matchesSchemaPattern(blobPattern, RUN_ID)).toBe(true);
+    expect(parseToolResponse(responseWithBlobs([RUN_ID])).ok).toBe(true);
+  });
+
   it("должен не пускать в error символы, которые отвергает разбор", async () => {
     const responseSchema = await readJson("harness.tool.v1.response.schema.json");
     const error = dig(responseSchema, ["properties", "error"]);
@@ -419,6 +446,17 @@ function requestBody(override: { run_id?: string; tool_call_id?: string; name?: 
     service: "files",
     name: override.name ?? "read_file",
     arguments: { path: "notes/a.txt" },
+  });
+}
+
+function responseWithBlobs(blobs: readonly string[]): string {
+  return JSON.stringify({
+    contract: CONTRACT_VERSION,
+    ok: true,
+    text: "ok",
+    truncated: false,
+    duration_ms: 1,
+    blobs,
   });
 }
 
