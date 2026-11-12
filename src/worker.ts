@@ -18,9 +18,10 @@ import { createDelegationTools } from "./delegation/index.js";
 import { createRunJournal, type RunJournal } from "./journal/index.js";
 import { MAX_COMPLETION_TOKENS } from "./model/limits.js";
 import { LiteLLMChatModel, collectSecrets } from "./model/index.js";
-import { createRunQueue } from "./queue/index.js";
+import { createModelSlots, createRunQueue, type ModelSlots } from "./queue/index.js";
 import { ClaudeSdkRunner, unavailableClaudeSdkClient } from "./runner/claude-sdk.js";
 import { OpenAICompatRunner, type RunnerAgent } from "./runner/index.js";
+import { runModelTurn, type ModelTurnOptions } from "./runner/model-turn.js";
 import { type ChatModelAlias } from "./runner/openai-compat.js";
 import { resolveModel } from "./routing/resolve.js";
 import { createServiceCatalog, maintainServiceRows } from "./services/index.js";
@@ -68,6 +69,8 @@ export interface WorkerLoopOptions {
   sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   /** После reap и до claim. Очередь этот модуль не импортирует. */
   maintainServices?: () => Promise<void>;
+  /** Нет поля — тесты цикла без таблицы слотов. Процесс воркера поле задаёт. */
+  slots?: ModelSlots;
 }
 
 export class WorkerError extends Error {
@@ -89,8 +92,8 @@ interface LockGate {
 type IdleSleep = (milliseconds: number, signal: AbortSignal) => Promise<void>;
 
 /**
- * Цикл воркера. claim внутри итерации один: параллельного захвата в этом файле нет.
- * Пул воркеров не создаётся.
+ * Цикл одного процесса. claim внутри итерации один: второй запуск не стартует раньше.
+ * Дочерние воркеры не порождаются. Число процессов задаёт установка.
  */
 export async function runWorker(options: WorkerLoopOptions): Promise<void> {
   assertLoopOptions(options);
@@ -170,6 +173,9 @@ async function runIteration(options: WorkerLoopOptions, sleep: IdleSleep): Promi
   }
 
   await options.queue.reapExpired();
+  if (options.slots !== undefined) {
+    await options.slots.reapExpired();
+  }
   if (options.maintainServices !== undefined) {
     await options.maintainServices();
   }
@@ -189,11 +195,15 @@ async function runIteration(options: WorkerLoopOptions, sleep: IdleSleep): Promi
   }
 
   logger.info({ run_id: claimed.id }, "run claimed");
-  await runClaimed(options, claimed);
+  await runClaimed(options, claimed, sleep);
   return !options.signal.aborted;
 }
 
-async function runClaimed(options: WorkerLoopOptions, claimed: ClaimedRun): Promise<void> {
+async function runClaimed(
+  options: WorkerLoopOptions,
+  claimed: ClaimedRun,
+  sleep: IdleSleep,
+): Promise<void> {
   const gate: LockGate = { held: true, active: true, timer: undefined };
   const timer = setInterval(() => {
     pulse(options, claimed.id, gate);
@@ -205,13 +215,22 @@ async function runClaimed(options: WorkerLoopOptions, claimed: ClaimedRun): Prom
   try {
     runner = await selectRunner(options, claimed);
     await passChatModelAlias(options, runner, claimed);
-    await runner.run(claimed, runnerContext(options, gate));
+    const ctx = runnerContext(options, gate);
+    if (options.slots !== undefined && runner instanceof OpenAICompatRunner) {
+      runner.assignModelTurn(modelTurnOf(options, sleep));
+      await runner.run(claimed, ctx);
+    } else if (options.slots !== undefined) {
+      await runSdkUnderSlot(options, claimed, runner, ctx, sleep);
+    } else {
+      await runner.run(claimed, ctx);
+    }
   } catch (error: unknown) {
     logger.error({ run_id: claimed.id, err: error }, "runner failed");
     await failOwnedRun(options, claimed.id, gate);
   } finally {
     if (runner instanceof OpenAICompatRunner) {
       runner.assignChatModelAlias(null);
+      runner.assignModelTurn(null);
     }
     gate.active = false;
     if (gate.timer !== undefined) {
@@ -219,6 +238,52 @@ async function runClaimed(options: WorkerLoopOptions, claimed: ClaimedRun): Prom
       gate.timer = undefined;
     }
   }
+}
+
+function modelTurnOf(options: WorkerLoopOptions, sleep: IdleSleep): ModelTurnOptions {
+  const slots = options.slots;
+  if (slots === undefined) {
+    throw new WorkerError("model_slots_mismatch", "model slots are not configured");
+  }
+  return {
+    slots,
+    heartbeatSeconds: options.heartbeatSeconds,
+    signal: options.signal,
+    sleep,
+  };
+}
+
+/**
+ * Внешний раннер не зовёт ChatModel.complete. Слот держится на весь его ход
+ * и отпускается коротким UPDATE, succeeded отсюда не ставится.
+ */
+async function runSdkUnderSlot(
+  options: WorkerLoopOptions,
+  claimed: ClaimedRun,
+  runner: Runner,
+  ctx: RunnerContext,
+  sleep: IdleSleep,
+): Promise<void> {
+  await runModelTurn({
+    turn: modelTurnOf(options, sleep),
+    runId: claimed.id,
+    workerId: options.workerId,
+    leaseSeconds: options.leaseSeconds,
+    heartbeatRun: (runId, workerId, leaseSeconds) => ctx.heartbeat(runId, workerId, leaseSeconds),
+    onSlotLost: async () => {
+      await ctx.finish(claimed.id, options.workerId, {
+        status: "failed",
+        finalText: null,
+        error: "slot_lost",
+        modelAlias: null,
+        provider: null,
+        promptTokens: null,
+        completionTokens: null,
+      });
+    },
+    call: () => runner.run(claimed, ctx),
+    afterHeld: () => Promise.resolve(),
+  });
 }
 
 /**
@@ -532,11 +597,43 @@ export function createWorkerChatModel(options: {
   });
 }
 
+/**
+ * Расхождение MODEL_SLOTS и count(*) останавливает процесс до захвата.
+ * В лог попадает код, не строка базы.
+ */
+export async function assertModelSlotCount(slots: ModelSlots, modelSlots: number): Promise<void> {
+  if (!Number.isSafeInteger(modelSlots) || modelSlots < 1) {
+    logger.error(
+      { code: "model_slots_mismatch", model_slots: modelSlots },
+      "model slot count mismatch",
+    );
+    throw new WorkerError("model_slots_mismatch", "model slot count does not match MODEL_SLOTS");
+  }
+  const rows = await slots.count();
+  if (rows !== modelSlots) {
+    logger.error(
+      { code: "model_slots_mismatch", model_slots: modelSlots, slot_rows: rows },
+      "model slot count mismatch",
+    );
+    throw new WorkerError("model_slots_mismatch", "model slot count does not match MODEL_SLOTS");
+  }
+}
+
+/** Проверка числа строк, затем цикл. Несовпадение не доходит до claimNext. */
+export async function runReadyWorker(
+  options: WorkerLoopOptions,
+  inventory: { slots: ModelSlots; modelSlots: number },
+): Promise<void> {
+  await assertModelSlotCount(inventory.slots, inventory.modelSlots);
+  await runWorker(options);
+}
+
 function workerLoopOptions(
   config: Config,
   sql: Sql,
   signal: AbortSignal,
   services: ServiceManifestLoad | null,
+  slots: ModelSlots,
 ): WorkerLoopOptions {
   const secrets = [
     ...collectSecrets({
@@ -600,6 +697,7 @@ function workerLoopOptions(
     maintainServices(): Promise<void> {
       return maintainServiceRows(sql);
     },
+    slots,
   };
 }
 
@@ -636,9 +734,11 @@ async function main(): Promise<void> {
     process.exit(0);
   });
   installProcessGuards();
-  logger.info({ worker_id: config.workerId }, "worker started");
+  const slots = createModelSlots(sql);
+  await assertModelSlotCount(slots, config.modelSlots);
+  logger.info({ worker_id: config.workerId, model_slots: config.modelSlots }, "worker started");
   try {
-    await runWorker(workerLoopOptions(config, sql, stop.signal, services));
+    await runWorker(workerLoopOptions(config, sql, stop.signal, services, slots));
   } finally {
     await sql.end({ timeout: 5 });
   }

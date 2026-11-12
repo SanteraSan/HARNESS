@@ -37,9 +37,9 @@ HTTP хаба сейчас, `src/api/app.ts`:
 
 Очередь захватывает запуск одним `UPDATE … FOR UPDATE SKIP LOCKED`. Оператор коммитится до модели. Пул `max: 4`. `statement_timeout` 15 с. `idle_in_transaction_session_timeout` 10 с. `chat_id` в драйвере остаётся строкой.
 
-Воркер держит один текущий запуск и дочерние процессы не порождает. `WORKER_ID` берётся из окружения, иначе из `hostname()`. `LEASE_SECONDS` 120, `HEARTBEAT_SECONDS` 15.
+Воркер держит один текущий запуск и дочерние процессы не порождает. Число процессов задаёт установка, по умолчанию один. `WORKER_ID` берётся из окружения, иначе из `hostname()`. `LEASE_SECONDS` 120, `HEARTBEAT_SECONDS` 15. `MODEL_SLOTS` по умолчанию 1.
 
-Миграции на диске: `001` … `008`. Колонка `max_completion_tokens` в `008_completion_limit.sql` — предел ответа модели. Таблицы `model_slots` в коде нет. Сортировка имён миграций уже в `src/db/migrate.ts`: `localeCompare` с локалью `en` и `numeric: true`; при нуле полное имя сравнивается по кодам UTF-16.
+Миграции на диске: `001` … `009` и `012`. Колонка `max_completion_tokens` в `008_completion_limit.sql` — предел ответа модели. Таблица `model_slots` создаётся в `009_model_slots.sql` без строк: число строк задаёт установка. Сортировка имён миграций уже в `src/db/migrate.ts`: `localeCompare` с локалью `en` и `numeric: true`; при нуле полное имя сравнивается по кодам UTF-16.
 
 Runtime-зависимости: `hono`, `grammy`, `postgres`, `zod`, `pino`. В devDependencies уже есть `husky` 9.1.7 и `@vitest/coverage-v8` той же версии, что `vitest` (`5.1.0`). Скрипт `prepare` — `husky`. `npm run test:coverage` пишет `coverage/lcov.info`.
 

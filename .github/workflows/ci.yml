@@ -314,8 +314,11 @@ jobs:
 
   # Скрипта build в package.json нет. Job проверяет сборку TypeScript текущим tsconfig.
   # tsc конфиг процесса не читает, секреты базы сюда не входят.
+  # Явное условие: пропущенный sonar на pull request не должен пропускать сборку.
+  # Иначе неявный success() считает skipped-соседство неуспехом и build не стартует.
   build:
     needs: trivy
+    if: ${{ !cancelled() && needs.trivy.result == 'success' }}
     runs-on:
       - self-hosted
       - harness-sonar

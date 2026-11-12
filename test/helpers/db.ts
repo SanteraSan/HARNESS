@@ -46,6 +46,7 @@ export async function cleanTestDatabase(
   }
 
   await sql.begin(async (tx) => {
+    await tx`delete from model_slots`;
     await tx`delete from service_model_steps`;
     await tx`delete from service_results`;
     await tx`delete from service_invocations`;
