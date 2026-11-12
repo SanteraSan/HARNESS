@@ -21,9 +21,13 @@ const envSchema = z.object({
   WORKER_ID: z.string().min(1).optional(),
   LEASE_SECONDS: z.coerce.number().int().positive().default(120),
   HEARTBEAT_SECONDS: z.coerce.number().int().positive().default(15),
+  MODEL_SLOTS: z.coerce.number().int().positive().default(1),
   HARNESS_LIVE_MODEL: z.string().min(1).optional(),
   SERVICES_MANIFEST: z.string().min(1).optional(),
-  SERVICES_MANIFEST_SHA256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  SERVICES_MANIFEST_SHA256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
 });
 
 export interface Config {
@@ -39,6 +43,7 @@ export interface Config {
   workerId: string;
   leaseSeconds: number;
   heartbeatSeconds: number;
+  modelSlots: number;
   harnessLiveModel: string | null;
   servicesManifestPath: string | null;
   servicesManifestSha256: string | null;
@@ -104,6 +109,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     workerId: data.WORKER_ID ?? hostname(),
     leaseSeconds: data.LEASE_SECONDS,
     heartbeatSeconds: data.HEARTBEAT_SECONDS,
+    modelSlots: data.MODEL_SLOTS,
     harnessLiveModel: data.HARNESS_LIVE_MODEL ?? null,
     servicesManifestPath: data.SERVICES_MANIFEST ?? null,
     servicesManifestSha256: data.SERVICES_MANIFEST_SHA256 ?? null,
@@ -237,6 +243,10 @@ function pickEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const heartbeatSeconds = trimmed(env.HEARTBEAT_SECONDS);
   if (heartbeatSeconds !== undefined) {
     raw.HEARTBEAT_SECONDS = heartbeatSeconds;
+  }
+  const modelSlots = trimmed(env.MODEL_SLOTS);
+  if (modelSlots !== undefined) {
+    raw.MODEL_SLOTS = modelSlots;
   }
   const liveModel = trimmed(env.HARNESS_LIVE_MODEL);
   if (liveModel !== undefined) {

@@ -20,6 +20,7 @@ import { redact } from "../model/redact.js";
 import { resolveModel } from "../routing/resolve.js";
 import { decideToolCall, modelToolsForAllowlist } from "../tools/index.js";
 import type { ServiceCatalog } from "../services/index.js";
+import { runModelTurn, type ModelTurnOptions } from "./model-turn.js";
 import { prepareToolResultForModel } from "./tool-result-text.js";
 
 /**
@@ -91,6 +92,8 @@ export class OpenAICompatRunner implements Runner {
   private readonly services: ServiceCatalog | undefined;
   /** Алиас текущего захвата. null — выбора нет, остаётся resolveModel. */
   private chatModelAlias: ChatModelAlias | null = null;
+  /** Слот хода модели. null — тесты без таблицы слотов, вызов идёт напрямую. */
+  private modelTurn: ModelTurnOptions | null = null;
 
   constructor(options: OpenAICompatRunnerOptions) {
     if (options.fileRoot.trim().length === 0) {
@@ -109,6 +112,14 @@ export class OpenAICompatRunner implements Runner {
    */
   assignChatModelAlias(alias: ChatModelAlias | null): void {
     this.chatModelAlias = alias;
+  }
+
+  /**
+   * Воркер передаёт слоты процесса на время захвата.
+   * null снимает их, чтобы следующий запуск не унаследовал чужой сигнал.
+   */
+  assignModelTurn(turn: ModelTurnOptions | null): void {
+    this.modelTurn = turn;
   }
 
   async run(claimed: ClaimedRun, ctx: RunnerContext): Promise<void> {
@@ -140,30 +151,49 @@ export class OpenAICompatRunner implements Runner {
 
       resolved = await this.resolveAlias(agent, claimed.tenantId, seenEffects, chatAlias);
       let cost = costFor(resolved.provider, null);
-      const requestStep = await this.writeStep(
-        ctx,
-        {
-          ...baseStep(claimed.id, "model_request"),
-          requestExcerpt: this.mask(`${resolved.modelAlias}\n${claimed.payload.message}`),
+      let requestStep: NewRunStep | undefined;
+      const turnResult = await runModelTurn({
+        turn: this.modelTurn,
+        runId: claimed.id,
+        workerId: ctx.workerId,
+        leaseSeconds: ctx.leaseSeconds,
+        heartbeatRun: (runId, workerId, leaseSeconds) =>
+          ctx.heartbeat(runId, workerId, leaseSeconds),
+        onSlotLost: async () => {
+          await this.finishSlotLost(ctx, claimed.id, resolved);
         },
-        cost,
-      );
-
-      logger.info({ run_id: claimed.id, model: resolved.modelAlias, attempt }, "model request");
-      const output = await ctx.model.complete({
-        model: resolved.modelAlias,
-        temperature: 0,
-        messages,
-        tools,
-        maxTokens: agent.maxCompletionTokens,
+        call: async () => {
+          requestStep = await this.writeStep(
+            ctx,
+            {
+              ...baseStep(claimed.id, "model_request"),
+              requestExcerpt: this.mask(`${resolved.modelAlias}\n${claimed.payload.message}`),
+            },
+            cost,
+          );
+          logger.info({ run_id: claimed.id, model: resolved.modelAlias, attempt }, "model request");
+          return ctx.model.complete({
+            model: resolved.modelAlias,
+            temperature: 0,
+            messages,
+            tools,
+            maxTokens: agent.maxCompletionTokens,
+          });
+        },
+        afterHeld: async (output) => {
+          totals.promptTokens = addTokens(totals.promptTokens, output.promptTokens);
+          totals.completionTokens = addTokens(totals.completionTokens, output.completionTokens);
+          cost = costFor(resolved.provider, output);
+          if (requestStep !== undefined && requestStep.costUsd !== cost) {
+            requestStep.costUsd = cost;
+            await this.reviseModelRequestCost(ctx, claimed.id, cost);
+          }
+        },
       });
-      totals.promptTokens = addTokens(totals.promptTokens, output.promptTokens);
-      totals.completionTokens = addTokens(totals.completionTokens, output.completionTokens);
-      cost = costFor(resolved.provider, output);
-      if (requestStep.costUsd !== cost) {
-        requestStep.costUsd = cost;
-        await this.reviseModelRequestCost(ctx, claimed.id, cost);
+      if (!turnResult.ok) {
+        return;
       }
+      const output = turnResult.value;
 
       const interpreted = interpretModelOutput(output);
       if (interpreted.type === "final") {
@@ -259,6 +289,28 @@ export class OpenAICompatRunner implements Runner {
         provider: agent.provider,
       },
       { toolEffects },
+    );
+  }
+
+  /**
+   * Ответ пришёл, когда слот уже не наш. Текст в succeeded не пишется.
+   * Лок запуска к этому моменту ещё проверяется finish: ноль строк — статус не меняется.
+   */
+  private async finishSlotLost(
+    ctx: RunnerContext,
+    runId: string,
+    resolved: ResolvedAlias,
+  ): Promise<void> {
+    await commitOutcome(
+      ctx,
+      runId,
+      outcomeFor(
+        resolved,
+        { promptTokens: null, completionTokens: null },
+        "failed",
+        null,
+        "slot_lost",
+      ),
     );
   }
 
@@ -468,7 +520,8 @@ export class OpenAICompatRunner implements Runner {
       {
         ...baseStep(runId, "tool_result"),
         toolName: call.name,
-        requestExcerpt: requestExcerpt === null ? this.mask(call.arguments) : this.mask(requestExcerpt),
+        requestExcerpt:
+          requestExcerpt === null ? this.mask(call.arguments) : this.mask(requestExcerpt),
         responseExcerpt: visible,
         error,
       },
