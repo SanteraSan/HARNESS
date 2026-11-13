@@ -8,7 +8,7 @@
 
 ## Порядок
 
-1. `02-contract.md`. Конверт `harness.tool.v1` и локальный манифест. Без них вызов сервиса не описан.
+1. `02-contract.md` — закрытый конверт `harness.tool.v1`. `09-tool-v2.md` — живой конверт первого вызова и отчёт. Пока сервис на проводе не отвечает, хаб зовёт v2. Две живые версии на проводе не держать.
 2. `03-slots-and-workers.md`. Слот модели берётся до вызова модели и отпускается до HTTP сервиса.
 3. `04-client-protocol.md` и `05-files.md` вместе. Маршруты файлов и байты в `BLOB_ROOT`.
 4. `01-services.md`. Вынос `read_file`, `list_dir`, `record_note`. Ему нужны конверт и порядок слота.
@@ -37,15 +37,15 @@ HTTP хаба сейчас, `src/api/app.ts`:
 
 Очередь захватывает запуск одним `UPDATE … FOR UPDATE SKIP LOCKED`. Оператор коммитится до модели. Пул `max: 4`. `statement_timeout` 15 с. `idle_in_transaction_session_timeout` 10 с. `chat_id` в драйвере остаётся строкой.
 
-Воркер держит один текущий запуск и дочерние процессы не порождает. `WORKER_ID` берётся из окружения, иначе из `hostname()`. `LEASE_SECONDS` 120, `HEARTBEAT_SECONDS` 15.
+Воркер держит один текущий запуск и дочерние процессы не порождает. Число процессов задаёт установка, по умолчанию один. `WORKER_ID` берётся из окружения, иначе из `hostname()`. `LEASE_SECONDS` 120, `HEARTBEAT_SECONDS` 15. `MODEL_SLOTS` по умолчанию 1.
 
-Миграции на диске: `001` … `008`. Колонка `max_completion_tokens` в `008_completion_limit.sql` — предел ответа модели. Таблицы `model_slots` в коде нет. Сортировка имён миграций уже в `src/db/migrate.ts`: `localeCompare` с локалью `en` и `numeric: true`; при нуле полное имя сравнивается по кодам UTF-16.
+Миграции на диске: `001` … `009` и `012`. Колонка `max_completion_tokens` в `008_completion_limit.sql` — предел ответа модели. Таблица `model_slots` создаётся в `009_model_slots.sql` без строк: число строк задаёт установка. Сортировка имён миграций уже в `src/db/migrate.ts`: `localeCompare` с локалью `en` и `numeric: true`; при нуле полное имя сравнивается по кодам UTF-16.
 
 Runtime-зависимости: `hono`, `grammy`, `postgres`, `zod`, `pino`. В devDependencies уже есть `husky` 9.1.7 и `@vitest/coverage-v8` той же версии, что `vitest` (`5.1.0`). Скрипт `prepare` — `husky`. `npm run test:coverage` пишет `coverage/lcov.info`.
 
 CI, Husky и ruleset описаны в `07-git.md`. Они уже включены. Шага Bandit в workflow нет.
 
-Пакет M3-P7 в `PLAN.md` имеет статус `ready`. Пустого списка инструментов для чата `coder-cloud` и поля `reasoning_effort` в коде ещё нет.
+Пакет M3-P7 в `PLAN.md` имеет статус `ready`. Пустого списка инструментов для чата `coder-cloud` и поля `reasoning_effort` в коде ещё нет. Разбор ответа в коде — `harness.tool.v1`, потолок тела 393627 байт (`SERVICE_RESPONSE_BODY_BYTES`). Живого HTTP к сервису нет. Назначение пакета первого вызова лежит в `PLAN.md`: M5-P1, статус `pending`. Этот каталог пакет не открывает.
 
 ## Что не начинать
 
@@ -54,6 +54,7 @@ CI, Husky и ruleset описаны в `07-git.md`. Они уже включен
 - Не писать клиент Jira и сервис длинного текста. В `01-services.md` это короткие примеры того же контракта.
 - Не подключать картинки M4, админку M3-P4, Redis, ORM, LangGraph, Claude Agent SDK, Ajv, gRPC и `helmet`.
 - Не делать M3-P7 попутно с выносом инструментов. Поле `reasoning_effort` этот каталог не добавляет. Когда M3-P7 будет сделан, у хода `coder-cloud` список инструментов пуст и HTTP сервиса нет.
+- Не вызывать сервис и не заводить таблицы отчёта мимо пакета, который назван в `PLAN.md`. Живой конверт — `09-tool-v2.md`.
 - Не переименовывать ветку `main` и не включать её в ruleset.
 - Не ослаблять ворота из `07-git.md` и не возвращать Bandit.
 - Не создавать репозитории Jira и длинного текста. Файловый сервис уже назван, адрес ниже. Контракт — каталог `contract/` этого репозитория, не отдельный продукт. На `main` этот каталог не кладётся.
@@ -79,12 +80,15 @@ CI, Husky и ruleset описаны в `07-git.md`. Они уже включен
 | `CAPABILITY_TTL_SECONDS` | 60 |
 | `BLOBS_PER_MESSAGE` | 8 |
 | `WRITE_TRANSPORT_ATTEMPTS` | 2 |
-| `SERVICE_RESPONSE_BYTES` | 64 КиБ плюс конверт 4 КиБ |
+| `SERVICE_RESPONSE_BYTES` | 393627 байт |
+| `REPORT_JSON_BYTES` | 8192 байт, отчёт v2 после `redact`, внутри потолка ответа |
 | `DESCRIPTION_MAX` | 500 символов |
 | `MODEL_SLOTS` | 1, пока установщик не записал иное |
 | `LEASE_SECONDS` / `HEARTBEAT_SECONDS` | 120 / 15 |
 
 Вызов модели и сервиса длиннее таймаута оператора SQL. Он стоит снаружи транзакции.
+
+`SERVICE_RESPONSE_BYTES` раньше в этой таблице был «64 КиБ плюс конверт 4 КиБ». В коде разбора это `SERVICE_RESPONSE_BODY_BYTES` = 393627 в `src/runner/tool-result-text.ts`. Норма — 393627. `POST /v1/runs` остаётся 32 КиБ. Отчёт 8192 байт лежит внутри этого потолка и его не увеличивает.
 
 ## Какие правила ядра меняются
 

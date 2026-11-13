@@ -24,10 +24,26 @@ describe("loadConfig", () => {
     expect(config.fileRoot).toBe("./workspace");
     expect(config.leaseSeconds).toBe(120);
     expect(config.heartbeatSeconds).toBe(15);
+    expect(config.modelSlots).toBe(1);
     expect(config.workerId).toBe(hostname());
     expect(config.harnessLiveModel).toBeNull();
     expect(config.telegramAllowedUserIds).toEqual(["1234567890123456789", "42"]);
     expect(config.telegramBotToken).toBe("");
+  });
+
+  it("должен принять MODEL_SLOTS и отказать нулю и имени модели", () => {
+    expect(loadConfig(baseEnv({ MODEL_SLOTS: "2" })).modelSlots).toBe(2);
+    expect(() => loadConfig(baseEnv({ MODEL_SLOTS: "0" }))).toThrow(ConfigError);
+    expect(() => loadConfig(baseEnv({ MODEL_SLOTS: "qwen" }))).toThrow(ConfigError);
+    try {
+      loadConfig(baseEnv({ MODEL_SLOTS: "0" }));
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConfigError);
+      if (error instanceof ConfigError) {
+        expect(error.message).not.toContain("postgres://");
+        expect(error.message).toContain("MODEL_SLOTS");
+      }
+    }
   });
 
   it("должен отказать без DATABASE_URL и не включить секрет в текст ошибки", () => {

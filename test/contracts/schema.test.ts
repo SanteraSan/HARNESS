@@ -29,11 +29,12 @@ describe("migration 001", () => {
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public'
         and c.relkind = 'r'
-        and c.relname in ('agents', 'runs', 'run_steps', 'schema_migrations')
+        and c.relname in ('agents', 'runs', 'run_steps', 'schema_migrations', 'model_slots')
       order by c.relname
     `;
     expect(tables.map((row) => row.relname)).toEqual([
       "agents",
+      "model_slots",
       "run_steps",
       "runs",
       "schema_migrations",
@@ -51,6 +52,8 @@ describe("migration 001", () => {
       "006_connector_secrets.sql",
       "007_chat_model.sql",
       "008_completion_limit.sql",
+      "009_model_slots.sql",
+      "012_service_reports.sql",
     ];
     expect(versions.map((row) => row.version)).toEqual(expectedVersions);
     expect(await listMigrationFiles(migrationsDirectory())).toEqual(expectedVersions);

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+import { RESPONSE_BODY_LIMIT_BYTES } from "../../contract/limits.js";
 import { interpretModelOutput } from "../../src/contracts/interpret.js";
 import type { ModelOutput } from "../../src/contracts/types.js";
 import { REDACTED, redact } from "../../src/model/redact.js";
 import {
   MODEL_TOOL_TEXT_CHARS,
   SERVICE_CONTRACT_VERSION,
+  SERVICE_RESPONSE_BODY_BYTES,
   prepareToolResultForModel,
   prepareToolResultText,
 } from "../../src/runner/tool-result-text.js";
@@ -172,10 +174,22 @@ describe("prepareToolResultForModel", () => {
     expect(JSON.stringify(prepared)).not.toContain(secret);
   });
 
-  it("должен отвергнуть тело длиннее 32 КиБ до разбора", () => {
-    const mark = "PAYLOADMARK";
-    const raw = mark.repeat(4000);
+  it("должен принять ответ длиннее 32 КиБ и отрезать текст модели до 8000", () => {
+    expect(SERVICE_RESPONSE_BODY_BYTES).toBe(RESPONSE_BODY_LIMIT_BYTES);
+    const text = "a".repeat(40_000);
+    const raw = successBody(text);
     expect(Buffer.byteLength(raw, "utf8")).toBeGreaterThan(32 * 1024);
+    expect(Buffer.byteLength(raw, "utf8")).toBeLessThanOrEqual(SERVICE_RESPONSE_BODY_BYTES);
+    expect(prepareToolResultForModel({ source: "service", body: raw })).toEqual({
+      ok: true,
+      text: "a".repeat(MODEL_TOOL_TEXT_CHARS),
+    });
+  });
+
+  it("должен отвергнуть тело длиннее потолка ответа до разбора", () => {
+    const mark = "PAYLOADMARK";
+    const raw = mark.repeat(Math.ceil((SERVICE_RESPONSE_BODY_BYTES + 1) / mark.length));
+    expect(Buffer.byteLength(raw, "utf8")).toBeGreaterThan(SERVICE_RESPONSE_BODY_BYTES);
 
     const prepared = prepareToolResultForModel({ source: "service", body: raw });
     expect(prepared).toEqual({ ok: false, reason: "payload_too_large" });
@@ -201,8 +215,32 @@ describe("prepareToolResultForModel", () => {
         blobs: [],
       }),
     });
-    expect(failure).toEqual({ ok: false, reason: "tool_error" });
+    expect(failure).toEqual({ ok: false, reason: "invalid_body" });
     expect(JSON.stringify(failure)).not.toContain(errorText);
+  });
+
+  it("должен отдать в роль tool строку error и не сырой JSON", () => {
+    const error = "path\u202a escapes root";
+    const raw = JSON.stringify({
+      contract: SERVICE_CONTRACT_VERSION,
+      ok: false,
+      error,
+      error_code: "forbidden",
+      truncated: false,
+      duration_ms: 2,
+      blobs: [] as string[],
+    });
+    const prepared = prepareToolResultForModel({ source: "service", body: raw });
+
+    expect(prepared).toEqual({ ok: true, text: "path escapes root" });
+    if (prepared.ok) {
+      expect(prepared.text.includes("{")).toBe(false);
+      expect(prepared.text.includes("error_code")).toBe(false);
+      expect(prepared.text.includes(SERVICE_CONTRACT_VERSION)).toBe(false);
+      expect(prepared.text.includes(raw)).toBe(false);
+    }
+    expect(prepared).not.toHaveProperty("toolCalls");
+    expect(interpretModelOutput(modelOutput("path escapes root")).type).not.toBe("tools");
   });
 
   it("должен отдать из принятого ответа только поле text", () => {

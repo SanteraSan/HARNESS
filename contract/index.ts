@@ -12,7 +12,7 @@ export {
   type ToolResponse,
 } from "./envelope.js";
 export { compareIdempotency, formatIdempotencyKey, parseIdempotencyHeader } from "./idempotency.js";
-export { clipModelText } from "./limits.js";
+export { clipModelText, fitListDirLines } from "./limits.js";
 export {
   BLOBS_MAX,
   DESCRIPTION_MAX,

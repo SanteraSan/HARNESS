@@ -1,7 +1,10 @@
+import { createHash, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parseServicesManifest, type ServicesManifest } from "../contract/manifest.js";
 import pino from "pino";
 import { z } from "zod";
 
@@ -18,7 +21,13 @@ const envSchema = z.object({
   WORKER_ID: z.string().min(1).optional(),
   LEASE_SECONDS: z.coerce.number().int().positive().default(120),
   HEARTBEAT_SECONDS: z.coerce.number().int().positive().default(15),
+  MODEL_SLOTS: z.coerce.number().int().positive().default(1),
   HARNESS_LIVE_MODEL: z.string().min(1).optional(),
+  SERVICES_MANIFEST: z.string().min(1).optional(),
+  SERVICES_MANIFEST_SHA256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
 });
 
 export interface Config {
@@ -34,7 +43,10 @@ export interface Config {
   workerId: string;
   leaseSeconds: number;
   heartbeatSeconds: number;
+  modelSlots: number;
   harnessLiveModel: string | null;
+  servicesManifestPath: string | null;
+  servicesManifestSha256: string | null;
 }
 
 export class ConfigError extends Error {
@@ -97,8 +109,75 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     workerId: data.WORKER_ID ?? hostname(),
     leaseSeconds: data.LEASE_SECONDS,
     heartbeatSeconds: data.HEARTBEAT_SECONDS,
+    modelSlots: data.MODEL_SLOTS,
     harnessLiveModel: data.HARNESS_LIVE_MODEL ?? null,
+    servicesManifestPath: data.SERVICES_MANIFEST ?? null,
+    servicesManifestSha256: data.SERVICES_MANIFEST_SHA256 ?? null,
   };
+}
+
+export interface ServiceManifestLoad {
+  manifest: ServicesManifest;
+  secretsByEnv: ReadonlyMap<string, string>;
+  redactSecrets: readonly string[];
+}
+
+/**
+ * Пустой путь не включает HTTP. Битый файл или сумма останавливают процесс до захвата.
+ * src/services само окружение не читает: секрет по имени забирается здесь.
+ */
+export async function readServiceManifest(config: Config): Promise<ServiceManifestLoad | null> {
+  return readServiceManifestFrom(config, process.env);
+}
+
+async function readServiceManifestFrom(
+  config: Config,
+  env: NodeJS.ProcessEnv,
+): Promise<ServiceManifestLoad | null> {
+  if (config.servicesManifestPath === null && config.servicesManifestSha256 === null) {
+    return null;
+  }
+  if (config.servicesManifestPath === null || config.servicesManifestSha256 === null) {
+    throw new ConfigError(["SERVICES_MANIFEST"]);
+  }
+  let raw: string;
+  try {
+    // Путь манифеста задаёт оператор в конфигурации, не модель.
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- путь из конфига процесса
+    raw = await readFile(config.servicesManifestPath, "utf8");
+  } catch {
+    throw new ConfigError(["SERVICES_MANIFEST"]);
+  }
+  const actual = createHash("sha256").update(raw, "utf8").digest();
+  const expected = Buffer.from(config.servicesManifestSha256, "hex");
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    throw new ConfigError(["SERVICES_MANIFEST_SHA256"]);
+  }
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(raw) as unknown;
+  } catch {
+    throw new ConfigError(["SERVICES_MANIFEST"]);
+  }
+  const parsed = parseServicesManifest(parsedJson);
+  if (!parsed.ok) {
+    throw new ConfigError(["SERVICES_MANIFEST"]);
+  }
+  const secretsByEnv = new Map<string, string>();
+  const redactSecrets: string[] = [];
+  for (const service of parsed.value.services) {
+    if (service.auth.type !== "bearer") {
+      continue;
+    }
+    const value = env[service.auth.env];
+    if (typeof value !== "string" || value.length === 0) {
+      throw new ConfigError([service.auth.env]);
+    }
+    secretsByEnv.set(service.auth.env, value);
+    redactSecrets.push(value);
+  }
+  logger.info({ services: parsed.value.services.length }, "service manifest loaded");
+  return { manifest: parsed.value, secretsByEnv, redactSecrets };
 }
 
 export function errorCode(error: unknown): string {
@@ -165,9 +244,21 @@ function pickEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   if (heartbeatSeconds !== undefined) {
     raw.HEARTBEAT_SECONDS = heartbeatSeconds;
   }
+  const modelSlots = trimmed(env.MODEL_SLOTS);
+  if (modelSlots !== undefined) {
+    raw.MODEL_SLOTS = modelSlots;
+  }
   const liveModel = trimmed(env.HARNESS_LIVE_MODEL);
   if (liveModel !== undefined) {
     raw.HARNESS_LIVE_MODEL = liveModel;
+  }
+  const manifest = trimmed(env.SERVICES_MANIFEST);
+  if (manifest !== undefined) {
+    raw.SERVICES_MANIFEST = manifest;
+  }
+  const manifestSha = trimmed(env.SERVICES_MANIFEST_SHA256);
+  if (manifestSha !== undefined) {
+    raw.SERVICES_MANIFEST_SHA256 = manifestSha;
   }
   return raw;
 }

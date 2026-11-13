@@ -55,6 +55,7 @@ export function compareIdempotency(input: {
     return { kind: "conflict", status: 409, reason: "idempotency_conflict" };
   }
   if (input.stored.state === "started") {
+    // Ответа ещё нет: 409 не окончательный отказ, вызывающий повторяет тот же ключ.
     return { kind: "in_progress", status: 409, reason: "idempotency_in_progress" };
   }
   if (input.stored.response === null) {
