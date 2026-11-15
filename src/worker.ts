@@ -281,7 +281,11 @@ async function runSdkUnderSlot(
         completionTokens: null,
       });
     },
-    call: () => runner.run(claimed, ctx),
+    // Клиент SDK сигнал не принимает. Слот держится, пока run не вернётся.
+    call: (signal) => {
+      void signal;
+      return runner.run(claimed, ctx);
+    },
     afterHeld: () => Promise.resolve(),
   });
 }

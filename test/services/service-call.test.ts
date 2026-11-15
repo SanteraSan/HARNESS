@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { canonicalBody } from "../../contract/canonical.js";
 import { parseServicesManifest, type ServiceEntry, type ServiceTool } from "../../contract/manifest.js";
 import type { ClaimedRun, FinishOutcome, ModelOutput, RunnerContext, Tool } from "../../src/contracts/types.js";
 import { REDACTED } from "../../src/model/redact.js";
@@ -395,6 +396,208 @@ describe("service call", () => {
     await runner.run(claim(runId), context(finishes));
     expect(finishes).toEqual([]);
   });
+
+  it("должен один раз повторить запись после обрыва соединения теми же байтами", async () => {
+    const runId = await insertRun();
+    const bodies: string[] = [];
+    handler = async (req, res) => {
+      const raw = await readRequest(req);
+      bodies.push(raw);
+      if (bodies.length === 1) {
+        req.socket.destroy();
+        return;
+      }
+      json(res, 200, reply(raw, { text: "записано" }));
+    };
+    const outcome = await call(runId, noteTool, { path: "out/a.txt", text: "hello" });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toBe(bodies[1]);
+    expect(outcome.text).toBe("записано");
+    expect(outcome.error).toBeNull();
+  });
+
+  it("должен не повторять запись после unauthorized", async () => {
+    const runId = await insertRun();
+    let hits = 0;
+    handler = async (req, res) => {
+      hits += 1;
+      await readRequest(req);
+      json(res, 401, { reason: "unauthorized" });
+    };
+    const outcome = await call(runId, noteTool, { path: "out/a.txt", text: "hello" });
+    expect(hits).toBe(1);
+    expect(outcome.text).toBe("unauthorized");
+  });
+
+  it("должен вернуть ошибку инструмента, если тело ответа оборвалось", async () => {
+    const runId = await insertRun();
+    handler = async (req, res) => {
+      await readRequest(req);
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.write('{"ok":');
+      res.destroy();
+    };
+    const outcome = await call(runId, readTool, { path: "a.txt" });
+    expect(outcome.lockLost).toBe(false);
+    expect(outcome.text).toBe("connection_error");
+  });
+
+  it("должен отвергнуть повтор uuid в blobs до принятия текста", async () => {
+    const runId = await insertRun();
+    const blobId = "00000000-0000-4000-8000-0000000000bb";
+    handler = async (req, res) => {
+      const body = reply(await readRequest(req), { text: "секретный текст" });
+      body.blobs = [blobId, blobId];
+      json(res, 200, body);
+    };
+    const outcome = await call(runId, readTool, { path: "a.txt" });
+    expect(outcome.text).toBe("invalid_envelope");
+    expect(outcome.text).not.toContain("секретный");
+  });
+
+  it("должен сохранить явный JSON null в полях отчёта", async () => {
+    const runId = await insertRun();
+    handler = async (req, res) => {
+      json(res, 200, reply(await readRequest(req), {
+        report: {
+          has_model: false,
+          claimed_prompt_tokens: null,
+          claimed_completion_tokens: null,
+          claimed_cost_usd: null,
+          finish_reason: null,
+          steps: null,
+        },
+      }));
+    };
+    const outcome = await call(runId, readTool, { path: "a.txt" });
+    expect(outcome.error).toBeNull();
+    const rows = await sql<{ report_status: string; report: Record<string, unknown> }[]>`
+      select result.report_status, result.report
+      from service_results as result
+      join service_invocations as invocation on invocation.id = result.invocation_id
+      where invocation.run_id = ${runId}
+    `;
+    expect(rows[0]?.report_status).toBe("valid");
+    expect(rows[0]?.report.claimed_prompt_tokens).toBeNull();
+    expect(rows[0]?.report.finish_reason).toBeNull();
+    expect(rows[0]?.report.steps).toBeNull();
+  });
+
+  it("должен проверить аргументы чужого инструмента по схеме манифеста", async () => {
+    const runId = await insertRun();
+    let hits = 0;
+    handler = async (req, res) => {
+      hits += 1;
+      json(res, 200, reply(await readRequest(req), { text: "pong" }));
+    };
+    const ping: ServiceTool = {
+      name: "ping_tool",
+      version: "1",
+      effect: "read",
+      description: "Пинг.",
+      accepts_blobs: false,
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["n"],
+        properties: { n: { type: "integer" } },
+      },
+    };
+    const bad = await call(runId, ping, { n: "x" });
+    expect(bad.text).toBe("invalid arguments");
+    expect(hits).toBe(0);
+    const good = await call(runId, ping, { n: 2 });
+    expect(hits).toBe(1);
+    expect(good.text).toBe("pong");
+    expect(good.error).toBeNull();
+  });
+
+  it("должен вызвать сервис для имени, которого нет в локальном реестре", async () => {
+    const runId = await insertRun();
+    let executed = false;
+    const finishes: FinishOutcome[] = [];
+    const kinds: string[] = [];
+    const runner = new OpenAICompatRunner({
+      loadAgent(): Promise<RunnerAgent> {
+        return Promise.resolve({ ...agent(), toolAllowlist: ["ping_tool"], maxSteps: 2 });
+      },
+      fileRoot: "/tmp/harness-service-test",
+      secrets: [],
+      services: {
+        has: (name) => name === "ping_tool",
+        modelTools(): { name: string; description: string; parameters: Record<string, unknown> }[] {
+          return [
+            {
+              name: "ping_tool",
+              description: "Пинг.",
+              parameters: { type: "object", additionalProperties: false, properties: {} },
+            },
+          ];
+        },
+        execute(): Promise<{ lockLost: boolean; text: string; error: string | null; requestExcerpt: string }> {
+          executed = true;
+          return Promise.resolve({
+            lockLost: false,
+            text: "pong",
+            error: null,
+            requestExcerpt: "ping_tool",
+          });
+        },
+      },
+    });
+    const base = context(finishes);
+    await runner.run(claim(runId), {
+      ...base,
+      tools: [],
+      model: {
+        complete(): Promise<ModelOutput> {
+          return Promise.resolve({
+            content: null,
+            toolCalls: [{ id: "call_1", name: "ping_tool", arguments: "{}" }],
+            promptTokens: 1,
+            completionTokens: 1,
+            model: "fake",
+          });
+        },
+      },
+      appendStep(step): Promise<void> {
+        kinds.push(step.kind);
+        return Promise.resolve();
+      },
+    });
+    expect(executed).toBe(true);
+    expect(kinds).not.toContain("policy_deny");
+    expect(finishes[0]?.status).toBe("failed");
+  });
+
+  it("должен принять отчёт у потолка канонических байт, даже если текст jsonb длиннее", async () => {
+    const report = reportNearCanonicalLimit();
+    const canonical = canonicalBody(report);
+    expect(canonical.ok).toBe(true);
+    if (!canonical.ok) {
+      throw new Error("canonical report");
+    }
+    const canonicalBytes = Buffer.byteLength(canonical.value.text, "utf8");
+    expect(canonicalBytes).toBeLessThanOrEqual(8192);
+    const formatted = await sql<{ bytes: number }[]>`
+      select octet_length(${JSON.stringify(report)}::jsonb::text) as bytes
+    `;
+    expect(formatted[0]?.bytes).toBeGreaterThan(8192);
+
+    const runId = await insertRun();
+    handler = async (req, res) => {
+      json(res, 200, reply(await readRequest(req), { text: "годный", report }));
+    };
+    const outcome = await call(runId, readTool, { path: "a.txt" });
+    expect(outcome.error).toBeNull();
+    const rows = await sql<{ report_status: string }[]>`
+      select result.report_status
+      from service_results as result
+      join service_invocations as invocation on invocation.id = result.invocation_id
+      where invocation.run_id = ${runId}
+    `;
+    expect(rows[0]?.report_status).toBe("valid");
+  });
 });
 
 async function insertRun(): Promise<string> {
@@ -543,6 +746,55 @@ function context(finishes: FinishOutcome[]): RunnerContext {
       return Promise.resolve();
     },
   };
+}
+
+function reportAt(excerptChars: number): Record<string, unknown> {
+  const excerpt = "я".repeat(excerptChars);
+  const steps: Record<string, unknown>[] = [];
+  for (let index = 0; index < 16; index += 1) {
+    steps.push({
+      step_index: index,
+      excerpt,
+      finish_reason: null,
+      claimed_prompt_tokens: null,
+      claimed_completion_tokens: null,
+      claimed_cost_usd: null,
+      tool_calls: null,
+    });
+  }
+  return {
+    has_model: true,
+    claimed_prompt_tokens: null,
+    claimed_completion_tokens: null,
+    claimed_cost_usd: null,
+    finish_reason: null,
+    steps,
+  };
+}
+
+function reportNearCanonicalLimit(): Record<string, unknown> {
+  let low = 0;
+  let high = 400;
+  let best: Record<string, unknown> | null = null;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const report = reportAt(mid);
+    const canonical = canonicalBody(report);
+    if (!canonical.ok) {
+      high = mid - 1;
+      continue;
+    }
+    if (Buffer.byteLength(canonical.value.text, "utf8") <= 8192) {
+      best = report;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  if (best === null) {
+    throw new Error("report fixture");
+  }
+  return best;
 }
 
 function localTool(): Tool {

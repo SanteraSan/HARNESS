@@ -168,6 +168,136 @@ describe("model slot turn", () => {
     expect(stored.final_text).toBeNull();
     expect(stored.final_text).not.toBe("не-успех");
   });
+
+  it("должен сохранить суммы уже завершённых ходов, если следующий слот потерян", async () => {
+    await insertSlot();
+    const created = await enqueue("turn-totals");
+    const claimed = mustClaim(await queue.claimNext(WORKER_ID, 30));
+    expect(claimed.id).toBe(created.run.id);
+    const script: ModelOutput[] = [
+      {
+        content: null,
+        toolCalls: [{ id: "call-1", name: "read_file", arguments: "{}" }],
+        promptTokens: 2,
+        completionTokens: 3,
+        model: "agent",
+      },
+      {
+        content: "не-успех",
+        toolCalls: [],
+        promptTokens: 9,
+        completionTokens: 9,
+        model: "agent",
+      },
+    ];
+    const runner = new OpenAICompatRunner({
+      loadAgent: () => loadRunnerAgent(sql, AGENT_ID),
+      fileRoot: "./workspace",
+      secrets: [],
+    });
+    runner.assignModelTurn({
+      slots: createModelSlots(sql),
+      heartbeatSeconds: 3600,
+      signal: new AbortController().signal,
+      sleep: () => Promise.reject(new Error("slot wait must not run")),
+    });
+
+    await runner.run(
+      claimed,
+      context({
+        complete: async () => {
+          const output = script.shift();
+          if (output === undefined) {
+            throw new Error("model script exhausted");
+          }
+          if (script.length === 0) {
+            await sql`
+              update model_slots
+              set locked_by = null, locked_until = null, run_id = null
+              where slot_index = 1
+            `;
+          }
+          return output;
+        },
+      }),
+    );
+
+    const stored = await storedRun(claimed.id);
+    expect(stored.status).toBe("failed");
+    expect(stored.error).toBe("slot_lost");
+    expect(stored.final_text).toBeNull();
+    expect(stored.prompt_tokens).toBe(2);
+    expect(stored.completion_tokens).toBe(3);
+  });
+
+  it("должен не отдавать слот второму воркеру, пока висящий вызов не остановился после потери лока", async () => {
+    await insertSlot();
+    const created = await enqueue("turn-hang-lock");
+    const claimed = mustClaim(await queue.claimNext(WORKER_ID, 30));
+    expect(claimed.id).toBe(created.run.id);
+    let releaseCall: (value: ModelOutput) => void = () => {};
+    const hang = new Promise<ModelOutput>((resolve) => {
+      releaseCall = resolve;
+    });
+    let started: () => void = () => {};
+    const startedPromise = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let aborted = false;
+    const runner = new OpenAICompatRunner({
+      loadAgent: () => loadRunnerAgent(sql, AGENT_ID),
+      fileRoot: "./workspace",
+      secrets: [],
+    });
+    runner.assignModelTurn({
+      slots: createModelSlots(sql),
+      heartbeatSeconds: 1,
+      signal: new AbortController().signal,
+      sleep: () => Promise.reject(new Error("slot wait must not run")),
+    });
+
+    const runPromise = runner.run(
+      claimed,
+      context({
+        complete: (input) => {
+          started();
+          input.signal?.addEventListener("abort", () => {
+            aborted = true;
+          });
+          return hang;
+        },
+      }),
+    );
+
+    await startedPromise;
+    expect((await slotLock()).locked_by).toBe(WORKER_ID);
+    await sql`update runs set locked_by = 'reaper' where id = ${claimed.id}`;
+    const deadline = Date.now() + 4_000;
+    while (!aborted && Date.now() < deadline) {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+    }
+
+    expect(aborted).toBe(true);
+    expect(await createModelSlots(sql).claim("other-worker", claimed.id, 30)).toBeNull();
+    expect((await slotLock()).locked_by).toBe(WORKER_ID);
+
+    releaseCall({
+      content: "поздно",
+      toolCalls: [],
+      promptTokens: 9,
+      completionTokens: 9,
+      model: "agent",
+    });
+    await runPromise;
+
+    expect((await slotLock()).locked_by).toBeNull();
+    const stored = await storedRun(claimed.id);
+    expect(stored.status).not.toBe("succeeded");
+    expect(stored.status).toBe("running");
+    expect(stored.final_text).toBeNull();
+  });
 });
 
 function enqueue(idempotencyKey: string) {
@@ -222,15 +352,19 @@ async function storedRun(id: string): Promise<{
   status: string;
   final_text: string | null;
   error: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
 }> {
   const rows = await sql<
     {
       status: string;
       final_text: string | null;
       error: string | null;
+      prompt_tokens: number | null;
+      completion_tokens: number | null;
     }[]
   >`
-    select status, final_text, error from runs where id = ${id}
+    select status, final_text, error, prompt_tokens, completion_tokens from runs where id = ${id}
   `;
   const row = rows[0];
   if (row === undefined) {

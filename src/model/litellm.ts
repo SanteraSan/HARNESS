@@ -160,6 +160,7 @@ export class LiteLLMChatModel implements ChatModel {
           accept: "application/json",
         },
         this.timeoutMs,
+        input.signal,
       );
     } catch (error) {
       throw transportError(error, this.secrets);
@@ -350,8 +351,11 @@ function postJson(
   body: string,
   headers: Record<string, string>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<Response> {
-  const signal = AbortSignal.timeout(timeoutMs);
+  const timeout = AbortSignal.timeout(timeoutMs);
+  // Потеря лока отменяет запрос, не дожидаясь таймаута модели.
+  const requestSignal = signal === undefined ? timeout : AbortSignal.any([timeout, signal]);
   const request = url.protocol === "https:" ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -360,7 +364,7 @@ function postJson(
         return;
       }
       settled = true;
-      reject(error);
+      reject(error instanceof Error ? error : new Error("model transport failed"));
     };
     const succeed = (response: Response): void => {
       if (settled) {
@@ -378,7 +382,7 @@ function postJson(
           ...headers,
           "content-length": String(Buffer.byteLength(body)),
         },
-        signal,
+        signal: requestSignal,
       },
       (incoming) => {
         // Редирект не читаем и не повторяем: цель могла бы получить bearer.

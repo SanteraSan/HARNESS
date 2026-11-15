@@ -26,13 +26,17 @@ interface TurnGate {
   runLost: boolean;
   slotLost: boolean;
   released: boolean;
+  /** Отмена вызова после потери лока. Клиент может сигнал не слушать. */
+  abort: AbortController;
 }
 
 export type ModelTurnResult<T> = { ok: true; value: T } | { ok: false };
 
 /**
- * Ход модели держит слот до записи сумм токенов либо до потери лока запуска.
- * Отпускание — короткий UPDATE до разбора инструментов и до HTTP сервиса.
+ * Ход модели держит слот, пока вызов не остановился.
+ * Потеря лока запуска слот не отпускает и succeeded не ставит: вызов отменяется сигналом,
+ * если клиент его слушает. Иначе слот занят до возврата вызова, не дольше таймаута модели.
+ * Отпускание — в finally, после остановки вызова, до разбора инструментов и до HTTP сервиса.
  * Нет слота в опциях — вызов идёт как раньше: тесты без таблицы слотов.
  */
 export async function runModelTurn<T>(args: {
@@ -42,11 +46,11 @@ export async function runModelTurn<T>(args: {
   leaseSeconds: number;
   heartbeatRun: (runId: string, workerId: string, leaseSeconds: number) => Promise<boolean>;
   onSlotLost: (slotIndex: number) => Promise<void>;
-  call: () => Promise<T>;
+  call: (signal: AbortSignal) => Promise<T>;
   afterHeld: (value: T) => Promise<void>;
 }): Promise<ModelTurnResult<T>> {
   if (args.turn === null) {
-    const value = await args.call();
+    const value = await args.call(new AbortController().signal);
     await args.afterHeld(value);
     return { ok: true, value };
   }
@@ -67,14 +71,20 @@ export async function runModelTurn<T>(args: {
 
   const slotIndex = waited.slotIndex;
   const turn = args.turn;
-  const gate: TurnGate = { active: true, runLost: false, slotLost: false, released: false };
+  const gate: TurnGate = {
+    active: true,
+    runLost: false,
+    slotLost: false,
+    released: false,
+    abort: new AbortController(),
+  };
   const timer = setInterval(() => {
     pulseSlot(turn, args, slotIndex, gate);
   }, delay);
   timer.unref();
 
   try {
-    const value = await args.call();
+    const value = await args.call(gate.abort.signal);
     gate.active = false;
     clearInterval(timer);
     if (gate.runLost) {
@@ -101,6 +111,12 @@ export async function runModelTurn<T>(args: {
       return { ok: false };
     }
     return { ok: true, value };
+  } catch (error) {
+    // Отмена из-за потери лока — не падение раннера и не succeeded.
+    if (gate.runLost) {
+      return { ok: false };
+    }
+    throw error;
   } finally {
     gate.active = false;
     clearInterval(timer);
@@ -131,8 +147,9 @@ function pulseSlot(
 }
 
 /**
- * Потеря лока запуска отпускает слот сразу, коротким UPDATE.
- * Пока лок жив, heartbeat только продлевает аренду и второй вызов слот не берёт.
+ * Потеря лока запуска отменяет вызов и не отпускает слот.
+ * Аренда слота продлевается, пока вызов не остановился: иначе reap отдал бы строку,
+ * и второй воркер начал бы вызов, пока первый ещё не вернулся.
  */
 async function touchSlot(
   turn: ModelTurnOptions,
@@ -151,10 +168,11 @@ async function touchSlot(
   }
   if (!runAlive) {
     gate.runLost = true;
-    const freed = await turn.slots.release(slotIndex, args.workerId, args.runId);
-    if (freed) {
-      gate.released = true;
+    if (!gate.abort.signal.aborted) {
+      gate.abort.abort();
     }
+  }
+  if (!gate.active) {
     return;
   }
   const slotAlive = await turn.slots.heartbeat(

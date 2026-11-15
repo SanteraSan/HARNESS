@@ -180,7 +180,7 @@
 
 Битый тип, лишнее поле, непустой след при `has_model: false`, адрес, промпт длиннее выдержки — одно следствие: `report_status = invalid`, jsonb не хранится, колонки заявлений отчёта `NULL`, строки `service_model_steps` нет. `text` или `error` конверта в модель идёт. `claimed_duration_ms` берётся из годного поля конверта `duration_ms`, не из отчёта.
 
-Годный отчёт хранится jsonb после `redact` строк. Потолок — 8192 байта UTF-8 канонического JSON без пробелов между лексемами. Сначала `redact`, потом замер. Выше потолка — тот же `invalid`, jsonb в INSERT не передаётся. Ограничение SQL повторяет 8192 и вторым порогом не служит.
+Годный отчёт хранится jsonb после `redact` строк. Потолок — 8192 байта UTF-8 канонического JSON без пробелов между лексемами. Сначала `redact`, потом замер. Выше потолка — тот же `invalid`, jsonb в INSERT не передаётся. Ограничение SQL считает те же канонические байты функцией `harness_canonical_json_bytes`, а не `octet_length(report::text)`: у текста jsonb есть пробелы после `:` и `,`. Второй, более тесный порог не вводится. Функция и замена проверки — `migrations/013_report_canonical_bytes.sql`: в `012` проверка ещё смотрела на `report::text`.
 
 ## Null
 
@@ -223,9 +223,9 @@ JSON `null` у самого ключа `report` схема не принимае
 
 ## Идемпотентность
 
-Ключ — `<run_id>:<tool_call_id>`. Отпечаток — SHA-256 канонического тела, включая первый отчёт, потому что отчёт — часть того же ответа.
+Ключ — `<run_id>:<tool_call_id>`. Отпечаток `request_sha256` — SHA-256 канонического тела запроса, того, что реально ушло, без отчёта: в момент проверки запроса отчёта ещё нет. Сервис сравнивает этот хеш и хранит первый ответ целиком, включая его `report`. Отпечаток запроса и содержимое ответа не смешиваются.
 
-Повтор того же ключа и того же хеша возвращает первое тело. Заявления из второго тела не дописываются. Другое тело — `409` и `reason: "idempotency_conflict"`, без нового эффекта. `422` нет.
+Повтор того же ключа и того же хеша запроса возвращает первое тело. Заявления из второго тела не дописываются. Другое тело — `409` и `reason: "idempotency_conflict"`, без нового эффекта. `422` нет.
 
 У `effect: "write"` не больше двух отправок одного и того же тела. Вторая отправка — только при обрыве, таймауте или `409` `idempotency_in_progress`. Обрыв и таймаут повторяются сразу. `idempotency_in_progress` повторяется один раз после паузы 1 с. Пауза транзакцию базы не держит. У `effect: "read"` второй отправки нет. `401` не повторяется. Годный конверт, битый `report`, чужой nonce, лишнее поле и `idempotency_conflict` не повторяются.
 
@@ -313,11 +313,15 @@ create table service_results (
     'conflict', 'unavailable', 'internal'
   )),
   check ((ok and error_code is null) or (not ok and error_code is not null)),
+  -- Уборка обнуляет report и не меняет report_status, поэтому valid допускает null.
   check (
-    (report_status = 'valid' and report is not null)
+    (report_status = 'valid')
     or (report_status in ('absent', 'invalid') and report is null)
   ),
-  check (report is null or octet_length(report::text) <= 8192),
+  check (
+    report is null
+    or coalesce(harness_canonical_json_bytes(report), 8193) <= 8192
+  ),
   check (report_status = 'valid' or (
     claimed_prompt_tokens is null
     and claimed_completion_tokens is null

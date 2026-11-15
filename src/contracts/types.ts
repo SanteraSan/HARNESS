@@ -107,6 +107,11 @@ export interface ModelInput {
   temperature: 0;
   /** Предел этого вызова. Без него шлюз не останавливает генерацию. */
   maxTokens: number;
+  /**
+   * Отмена хода, когда лок запуска уже не наш.
+   * Клиент, который поле не читает, просто дожидается своего таймаута.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ModelOutput {

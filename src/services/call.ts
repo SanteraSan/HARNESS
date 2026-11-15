@@ -9,6 +9,7 @@ import { JSON_BODY_LIMIT_BYTES } from "../../contract/limits.js";
 import { redact } from "../model/redact.js";
 import type { Sql } from "../db/client.js";
 import { prepareToolResultForModel, MODEL_TOOL_TEXT_CHARS } from "../runner/tool-result-text.js";
+import { parseServiceArguments } from "./arguments.js";
 import { parseServiceEnvelope, SERVICE_CONTRACT } from "./envelope.js";
 import { decideReport } from "./report.js";
 import {
@@ -57,7 +58,17 @@ export async function executeServiceCall(input: ServiceCallInput): Promise<Servi
     return invalid(fallback);
   }
   const parsed = parseToolArguments(input.tool.name, omitted.value);
-  if (!parsed.ok) {
+  let argumentsValue: Record<string, unknown>;
+  if (parsed.ok) {
+    argumentsValue = parsed.value;
+  } else if (parsed.reason === "unknown_tool") {
+    // Имя вне трёх локальных инструментов сверяется со схемой манифеста, не с их zod.
+    const matched = parseServiceArguments(input.tool.parameters, omitted.value);
+    if (matched === null) {
+      return invalid(fallback);
+    }
+    argumentsValue = matched;
+  } else {
     return invalid(fallback);
   }
   const existing = await findInvocation(input.sql, input.runId, input.toolCallId);
@@ -81,7 +92,7 @@ export async function executeServiceCall(input: ServiceCallInput): Promise<Servi
     agent_id: input.agentId,
     service: input.service.id,
     name: input.tool.name,
-    arguments: parsed.value,
+    arguments: argumentsValue,
     nonce,
   };
   const canonical = canonicalBody(body);
@@ -107,7 +118,7 @@ export async function executeServiceCall(input: ServiceCallInput): Promise<Servi
   const excerpt = `${input.tool.name} ${hash.toString("hex")}`;
   const timeoutMs = input.timeoutMs ?? (input.tool.effect === "write" ? WRITE_TIMEOUT_MS : READ_TIMEOUT_MS);
   const attempt = await send(input, bytes, timeoutMs);
-  if (input.tool.effect === "write" && (attempt.kind === "retry" || attempt.kind === "timeout")) {
+  if (input.tool.effect === "write" && shouldRetryWrite(attempt)) {
     if (attempt.kind === "retry") {
       await delay(input.retryDelayMs ?? 1000);
     }
@@ -238,9 +249,17 @@ type Attempt =
       bytes: number;
     };
 
+function shouldRetryWrite(attempt: Attempt): boolean {
+  if (attempt.kind === "retry" || attempt.kind === "timeout") {
+    return true;
+  }
+  return attempt.kind === "transport" && attempt.code === "connection_error";
+}
+
 async function send(input: ServiceCallInput, bytes: Buffer, timeoutMs: number): Promise<Attempt> {
   const nonce = nonceOf(bytes);
   let response: Response;
+  let received: { text: string } | { tooLarge: true };
   try {
     response = await fetch(toolUrl(input.service.base_url, input.tool.name), {
       method: "POST",
@@ -249,13 +268,13 @@ async function send(input: ServiceCallInput, bytes: Buffer, timeoutMs: number): 
       body: bytes,
       signal: AbortSignal.timeout(timeoutMs),
     });
+    received = await readLimited(response);
   } catch (error) {
     if (isTimeout(error)) {
       return { kind: "timeout" };
     }
     return { kind: "transport", code: "connection_error", httpStatus: null, bytes: null };
   }
-  const received = await readLimited(response);
   if ("tooLarge" in received) {
     return { kind: "transport", code: "payload_too_large", httpStatus: response.status, bytes: null };
   }

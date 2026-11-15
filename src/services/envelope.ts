@@ -100,6 +100,9 @@ export function parseServiceEnvelope(
   if (!checked.success) {
     return { ok: false, reason: issueReason(checked.error.issues) };
   }
+  if (hasDuplicate(checked.data.blobs)) {
+    return { ok: false, reason: "invalid_envelope" };
+  }
   const reportPresent = Object.hasOwn(parsed.value, "report");
   if (checked.data.ok === false) {
     if (!errorCodeSchema.safeParse(checked.data.error_code).success && typeof checked.data.error_code !== "string") {
@@ -141,6 +144,17 @@ export function parseServiceEnvelope(
       reportPresent,
     },
   };
+}
+
+function hasDuplicate(values: readonly string[]): boolean {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) {
+      return true;
+    }
+    seen.add(value);
+  }
+  return false;
 }
 
 function issueReason(issues: readonly { code: string }[]): EnvelopeProblem {

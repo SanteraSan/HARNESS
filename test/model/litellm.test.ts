@@ -33,6 +33,46 @@ function userInput(overrides: Partial<ModelInput> = {}): ModelInput {
 }
 
 describe("LiteLLMChatModel", () => {
+  it("должен оборвать запрос, когда сигнал вызова отменён", async () => {
+    let seen = false;
+    let closed = false;
+    const server = createServer((req, res) => {
+      seen = true;
+      req.resume();
+      res.on("close", () => {
+        closed = true;
+      });
+    });
+    server.requestTimeout = 5_000;
+    await listen(server);
+    try {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        throw new Error("test server address");
+      }
+      const model = new LiteLLMChatModel({
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey,
+        timeoutMs: 60_000,
+      });
+      const controller = new AbortController();
+      const pending = model.complete(userInput({ signal: controller.signal }));
+      const deadline = Date.now() + 2_000;
+      while (!seen && Date.now() < deadline) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, 10);
+        });
+      }
+      expect(seen).toBe(true);
+      controller.abort();
+      const error = await capture(() => pending);
+      expect(error).toBeInstanceOf(ModelError);
+      await waitForClose(() => closed);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it("должен отправить POST chat/completions и разобрать текст без tool_calls", async () => {
     const input: ModelInput = {
       model: "agent",

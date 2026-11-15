@@ -18,6 +18,7 @@ import { logger } from "../config.js";
 import type { Sql } from "../db/client.js";
 import { redact } from "../model/redact.js";
 import { resolveModel } from "../routing/resolve.js";
+import { filterToolNames } from "../contracts/tool-policy.js";
 import { decideToolCall, modelToolsForAllowlist } from "../tools/index.js";
 import type { ServiceCatalog } from "../services/index.js";
 import { runModelTurn, type ModelTurnOptions } from "./model-turn.js";
@@ -160,9 +161,9 @@ export class OpenAICompatRunner implements Runner {
         heartbeatRun: (runId, workerId, leaseSeconds) =>
           ctx.heartbeat(runId, workerId, leaseSeconds),
         onSlotLost: async () => {
-          await this.finishSlotLost(ctx, claimed.id, resolved);
+          await this.finishSlotLost(ctx, claimed.id, resolved, totals);
         },
-        call: async () => {
+        call: async (signal) => {
           requestStep = await this.writeStep(
             ctx,
             {
@@ -178,6 +179,7 @@ export class OpenAICompatRunner implements Runner {
             messages,
             tools,
             maxTokens: agent.maxCompletionTokens,
+            signal,
           });
         },
         afterHeld: async (output) => {
@@ -296,22 +298,17 @@ export class OpenAICompatRunner implements Runner {
    * Ответ пришёл, когда слот уже не наш. Текст в succeeded не пишется.
    * Лок запуска к этому моменту ещё проверяется finish: ноль строк — статус не меняется.
    */
+  /**
+   * Суммы уже завершённых ходов сохраняются.
+   * Токены ответа, чей слот потерян, в totals ещё не входили: afterHeld для него не вызывался.
+   */
   private async finishSlotLost(
     ctx: RunnerContext,
     runId: string,
     resolved: ResolvedAlias,
+    totals: TokenTotals,
   ): Promise<void> {
-    await commitOutcome(
-      ctx,
-      runId,
-      outcomeFor(
-        resolved,
-        { promptTokens: null, completionTokens: null },
-        "failed",
-        null,
-        "slot_lost",
-      ),
-    );
+    await commitOutcome(ctx, runId, outcomeFor(resolved, totals, "failed", null, "slot_lost"));
   }
 
   private async finishFinal(
@@ -404,7 +401,32 @@ export class OpenAICompatRunner implements Runner {
         cost,
       );
 
-      // I3: запрет сильнее allowlist. Имя вне списка тоже не доходит до execute.
+      // I3: запрет сильнее allowlist. Имя сервиса не требует локального инструмента.
+      if (this.services?.has(call.name) === true) {
+        if (!filterToolNames(allowlist).includes(call.name)) {
+          const denial = this.toolData("tool denied");
+          await this.writeStep(
+            ctx,
+            {
+              ...baseStep(claimed.id, "policy_deny"),
+              toolName: call.name,
+              requestExcerpt: this.mask(call.arguments),
+              responseExcerpt: denial,
+              error: denial,
+            },
+            cost,
+          );
+          messages.push(toolMessage(call.id, denial));
+          continue;
+        }
+        const visible = await this.executeServiceTool(ctx, claimed, call, cost);
+        if (visible === null) {
+          return false;
+        }
+        messages.push(toolMessage(call.id, visible));
+        continue;
+      }
+
       const decision = decideToolCall(call.name, allowlist, ctx.tools);
       if (!decision.ok) {
         const denial = this.toolData(decision.error);
@@ -437,6 +459,50 @@ export class OpenAICompatRunner implements Runner {
       messages.push(toolMessage(call.id, visible));
     }
     return true;
+  }
+
+  /**
+   * Имя из манифеста не ищется в локальном реестре: схема аргументов — у сервиса.
+   * Запрет и allowlist уже проверены. Лок потерян — null, finish не вызывается.
+   */
+  private async executeServiceTool(
+    ctx: RunnerContext,
+    claimed: ClaimedRun,
+    call: ToolCall,
+    cost: number | null,
+  ): Promise<string | null> {
+    const services = this.services;
+    if (services === undefined) {
+      return null;
+    }
+    const parsed = parseArguments(call.arguments);
+    if (!parsed.ok) {
+      const visible = this.toolData("invalid arguments");
+      await this.appendToolResult(ctx, claimed.id, call, visible, visible, cost, null);
+      return visible;
+    }
+    const outcome = await services.execute({
+      runId: claimed.id,
+      tenantId: claimed.tenantId,
+      agentId: claimed.agentId,
+      workerId: ctx.workerId,
+      toolCallId: call.id,
+      name: call.name,
+      args: parsed.value,
+    });
+    if (outcome.lockLost) {
+      return null;
+    }
+    await this.appendToolResult(
+      ctx,
+      claimed.id,
+      call,
+      outcome.text,
+      outcome.error,
+      cost,
+      outcome.requestExcerpt,
+    );
+    return outcome.text;
   }
 
   private async executeAllowed(
