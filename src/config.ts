@@ -12,7 +12,9 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   HARNESS_TEST_DATABASE_URL: z.string().min(1).optional(),
   LITELLM_BASE_URL: z.url().default("http://127.0.0.1:4000/v1"),
+  LITELLM_ALLOWED_HOSTS: z.string().default(""),
   LITELLM_API_KEY: z.string().default(""),
+  CONNECTOR_SECRETS_KEY: z.string().default(""),
   HARNESS_API_TOKEN: z.string().default(""),
   TELEGRAM_BOT_TOKEN: z.string().default(""),
   TELEGRAM_ALLOWED_USER_IDS: z.string().default(""),
@@ -34,7 +36,9 @@ export interface Config {
   databaseUrl: string;
   harnessTestDatabaseUrl: string | null;
   litellmBaseUrl: string;
+  litellmAllowedHosts: readonly string[];
   litellmApiKey: string;
+  connectorSecretsKey: string;
   harnessApiToken: string;
   telegramBotToken: string;
   telegramAllowedUserIds: readonly string[];
@@ -72,6 +76,8 @@ export const logger = pino({
       "harnessApiToken",
       "TELEGRAM_BOT_TOKEN",
       "telegramBotToken",
+      "CONNECTOR_SECRETS_KEY",
+      "connectorSecretsKey",
       "password",
       "authorization",
       "Authorization",
@@ -96,11 +102,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
 
   const data = parsed.data;
+  const litellmAllowedHosts = parseHostList(data.LITELLM_ALLOWED_HOSTS);
+  assertLitellmBaseUrl(data.LITELLM_BASE_URL, litellmAllowedHosts);
   return {
     databaseUrl: data.DATABASE_URL,
     harnessTestDatabaseUrl: data.HARNESS_TEST_DATABASE_URL ?? null,
     litellmBaseUrl: data.LITELLM_BASE_URL,
+    litellmAllowedHosts,
     litellmApiKey: data.LITELLM_API_KEY,
+    connectorSecretsKey: data.CONNECTOR_SECRETS_KEY,
     harnessApiToken: data.HARNESS_API_TOKEN,
     telegramBotToken: data.TELEGRAM_BOT_TOKEN,
     telegramAllowedUserIds: parseIdList(data.TELEGRAM_ALLOWED_USER_IDS),
@@ -212,11 +222,17 @@ function pickEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   if (litellmBaseUrl !== undefined) {
     raw.LITELLM_BASE_URL = litellmBaseUrl;
   }
+  if (env.LITELLM_ALLOWED_HOSTS !== undefined) {
+    raw.LITELLM_ALLOWED_HOSTS = env.LITELLM_ALLOWED_HOSTS;
+  }
   if (env.LITELLM_API_KEY !== undefined) {
     raw.LITELLM_API_KEY = env.LITELLM_API_KEY;
   }
   if (env.HARNESS_API_TOKEN !== undefined) {
     raw.HARNESS_API_TOKEN = env.HARNESS_API_TOKEN;
+  }
+  if (env.CONNECTOR_SECRETS_KEY !== undefined) {
+    raw.CONNECTOR_SECRETS_KEY = env.CONNECTOR_SECRETS_KEY;
   }
   if (env.TELEGRAM_BOT_TOKEN !== undefined) {
     raw.TELEGRAM_BOT_TOKEN = env.TELEGRAM_BOT_TOKEN;
@@ -261,6 +277,55 @@ function pickEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     raw.SERVICES_MANIFEST_SHA256 = manifestSha;
   }
   return raw;
+}
+
+/**
+ * Шлюз по умолчанию — 127.0.0.1. Другой хост только из явного списка.
+ * Иначе ключ и текст хода уходят на адрес из ошибки оператора.
+ */
+function assertLitellmBaseUrl(value: string, allowedHosts: readonly string[]): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ConfigError(["LITELLM_BASE_URL"]);
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username !== "" ||
+    url.password !== ""
+  ) {
+    throw new ConfigError(["LITELLM_BASE_URL"]);
+  }
+  const host = url.hostname.toLowerCase();
+  if (host === "127.0.0.1") {
+    return;
+  }
+  const allowed = new Set(allowedHosts);
+  if (!allowed.has(host)) {
+    throw new ConfigError(["LITELLM_BASE_URL"]);
+  }
+}
+
+function parseHostList(value: string): readonly string[] {
+  const hosts: string[] = [];
+  for (const part of value.split(",")) {
+    const host = part.trim().toLowerCase();
+    if (host.length === 0) {
+      continue;
+    }
+    if (
+      host.length > 253 ||
+      host.includes("/") ||
+      host.includes("@") ||
+      host.includes(":") ||
+      host.includes(" ")
+    ) {
+      throw new ConfigError(["LITELLM_ALLOWED_HOSTS"]);
+    }
+    hosts.push(host);
+  }
+  return hosts;
 }
 
 function trimmed(value: string | undefined): string | undefined {

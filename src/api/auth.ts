@@ -1,10 +1,11 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 const BEARER_PREFIX = "Bearer ";
 
 /**
- * Секрет сравнивается через timingSafeEqual и только при равной длине буферов.
- * Пустой токен не подходит ни к какому заголовку: иначе пустой секрет открыл бы API.
+ * Сравниваются SHA-256 обоих значений, оба по 32 байта.
+ * Длина секрета не читается по времени: timingSafeEqual вызывается только на этих дайджестах.
+ * Пустой ожидаемый токен отвергается до хеша: иначе пустой секрет открыл бы API.
  */
 export function bearerMatches(expected: string, headerValue: string | undefined): boolean {
   if (headerValue === undefined || expected.length === 0) {
@@ -15,10 +16,7 @@ export function bearerMatches(expected: string, headerValue: string | undefined)
   }
 
   const presented = headerValue.slice(BEARER_PREFIX.length);
-  const expectedBytes = Buffer.from(expected, "utf8");
-  const presentedBytes = Buffer.from(presented, "utf8");
-  if (expectedBytes.length !== presentedBytes.length) {
-    return false;
-  }
-  return timingSafeEqual(expectedBytes, presentedBytes);
+  const expectedHash = createHash("sha256").update(expected, "utf8").digest();
+  const presentedHash = createHash("sha256").update(presented, "utf8").digest();
+  return timingSafeEqual(expectedHash, presentedHash);
 }

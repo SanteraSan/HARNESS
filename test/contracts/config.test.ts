@@ -20,6 +20,8 @@ describe("loadConfig", () => {
   it("должен подставить значения M1 и сохранить длинный id строкой", () => {
     const config = loadConfig(baseEnv());
     expect(config.litellmBaseUrl).toBe("http://127.0.0.1:4000/v1");
+    expect(config.litellmAllowedHosts).toEqual([]);
+    expect(config.connectorSecretsKey).toBe("");
     expect(config.agentSlug).toBe("clerk");
     expect(config.fileRoot).toBe("./workspace");
     expect(config.leaseSeconds).toBe(120);
@@ -44,6 +46,23 @@ describe("loadConfig", () => {
         expect(error.message).toContain("MODEL_SLOTS");
       }
     }
+  });
+
+  it("должен отказать, если хост шлюза не 127.0.0.1 и не назван в списке", () => {
+    expect(() =>
+      loadConfig(baseEnv({ LITELLM_BASE_URL: "https://models.example/v1" })),
+    ).toThrow(ConfigError);
+    expect(() => loadConfig(baseEnv({ LITELLM_BASE_URL: "http://localhost:4000/v1" }))).toThrow(
+      ConfigError,
+    );
+    const allowed = loadConfig(
+      baseEnv({
+        LITELLM_BASE_URL: "https://models.example/v1",
+        LITELLM_ALLOWED_HOSTS: "models.example",
+      }),
+    );
+    expect(allowed.litellmBaseUrl).toBe("https://models.example/v1");
+    expect(allowed.litellmAllowedHosts).toEqual(["models.example"]);
   });
 
   it("должен отказать без DATABASE_URL и не включить секрет в текст ошибки", () => {

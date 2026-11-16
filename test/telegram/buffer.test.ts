@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { FinishOutcome } from "../../src/contracts/types.js";
 import { createRunQueue } from "../../src/queue/index.js";
 import {
+  DIALOG_BUFFER_LIMIT,
   findExistingRun,
   hasPendingDialog,
   releaseNextBuffered,
@@ -11,6 +12,7 @@ import {
 import { parseDecimalChatId } from "../../src/telegram/chat-id.js";
 import {
   BUFFER_BEHIND_TEXT,
+  BUFFER_FULL_TEXT,
   replyForBuffered,
   type RunSnapshot,
   type TelegramUpdateView,
@@ -26,6 +28,66 @@ const CHAT_ID = "9223372036854775807";
 const ALLOWED = ["7"];
 
 describe("dialogBuffer", () => {
+  it("должен отказать сверх потолка и не писать новую строку", async () => {
+    const chatId = requiredChat();
+    for (let index = 0; index < DIALOG_BUFFER_LIMIT; index += 1) {
+      await saveDialogMessage(sql, {
+        tenantId: "local",
+        agentId: AGENT_ID,
+        chatId,
+        idempotencyKey: `cap-${index}`,
+        message: `текст ${index}`,
+      });
+    }
+    await expect(
+      saveDialogMessage(sql, {
+        tenantId: "local",
+        agentId: AGENT_ID,
+        chatId,
+        idempotencyKey: "cap-extra",
+        message: "лишнее",
+      }),
+    ).rejects.toMatchObject({ name: "TelegramError", code: "buffer_full" });
+    expect(await countBuffer()).toBe(DIALOG_BUFFER_LIMIT);
+
+    await saveDialogMessage(sql, {
+      tenantId: "local",
+      agentId: AGENT_ID,
+      chatId,
+      idempotencyKey: "cap-0",
+      message: "повтор",
+    });
+    expect(await countBuffer()).toBe(DIALOG_BUFFER_LIMIT);
+  });
+
+  it("должен ответить отказом, когда буфер занятого чата уже полон", async () => {
+    const chatId = requiredChat();
+    const queue = createRunQueue(sql);
+    const first = await handleTelegramUpdate(
+      textView("живой", "30"),
+      bufferOptions(telegramEnqueue(queue)),
+    );
+    if (first.followRunId === null) {
+      throw new Error("live run is missing");
+    }
+    for (let index = 0; index < DIALOG_BUFFER_LIMIT; index += 1) {
+      await saveDialogMessage(sql, {
+        tenantId: "local",
+        agentId: AGENT_ID,
+        chatId,
+        idempotencyKey: `live-${index}`,
+        message: `хвост ${index}`,
+      });
+    }
+    const refused = await handleTelegramUpdate(
+      textView("ещё", "31"),
+      bufferOptions(telegramEnqueue(queue)),
+    );
+    expect(refused.text).toBe(BUFFER_FULL_TEXT);
+    expect(await countRuns()).toBe(1);
+    expect(await countBuffer()).toBe(DIALOG_BUFFER_LIMIT);
+  });
+
   it("должен не создавать вторую строку сразу и создать одну после финиша", async () => {
     const chatId = requiredChat();
     const queue = createRunQueue(sql);

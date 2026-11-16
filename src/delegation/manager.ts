@@ -7,6 +7,15 @@ import { runTool } from "../tools/run.js";
 /** Как у payload постановки: длиннее раннер всё равно не примет. */
 const MESSAGE_MAX = 8000;
 
+/**
+ * Глубина 1 — запуск без родителя. Глубина 2 — его ребёнок.
+ * Ребёнок снова вызвать create_subtask не может: сверх потолка строка не создаётся.
+ */
+export const MAX_DELEGATION_DEPTH = 2;
+
+/** Сколько дочерних строк может поставить один parent_run_id. */
+export const MAX_CHILDREN_PER_PARENT = 8;
+
 const KEY_MAX = 256;
 
 const createSubtaskParameters = z
@@ -101,6 +110,14 @@ async function createSubtask(
   if (parent.taskStatus === "approved") {
     return failed("task is approved");
   }
+  const depth = await delegationDepth(deps.sql, ctx.runId);
+  if (depth >= MAX_DELEGATION_DEPTH) {
+    return failed("delegation depth");
+  }
+  const children = await childCount(deps.sql, ctx.runId);
+  if (children >= MAX_CHILDREN_PER_PARENT) {
+    return failed("delegation fanout");
+  }
 
   const result = await deps.queue.enqueue({
     tenantId: parent.tenantId,
@@ -154,6 +171,45 @@ async function approveParent(sql: Sql, ctx: ToolContext): Promise<ToolOutcome> {
     return done("approved");
   }
   return failed("task is missing");
+}
+
+async function delegationDepth(sql: Sql, runId: string): Promise<number> {
+  let depth = 1;
+  let current: string | null = runId;
+  const seen = new Set<string>();
+  while (current !== null && depth <= MAX_DELEGATION_DEPTH) {
+    if (seen.has(current)) {
+      return MAX_DELEGATION_DEPTH + 1;
+    }
+    seen.add(current);
+    const id: string = current;
+    const rows: { parent_run_id: string | null }[] = await sql<{ parent_run_id: string | null }[]>`
+      select parent_run_id
+      from runs
+      where id = ${id}
+    `;
+    const parent: { parent_run_id: string | null } | undefined = rows[0];
+    const parentId: string | null = parent?.parent_run_id ?? null;
+    if (parentId === null) {
+      return depth;
+    }
+    depth += 1;
+    current = parentId;
+  }
+  return depth;
+}
+
+async function childCount(sql: Sql, runId: string): Promise<number> {
+  const rows = await sql<{ count: number }[]>`
+    select count(*)::int as count
+    from runs
+    where parent_run_id = ${runId}
+  `;
+  const count = rows[0]?.count;
+  if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+    return MAX_CHILDREN_PER_PARENT;
+  }
+  return count;
 }
 
 async function readParent(sql: Sql, runId: string, agentId: string): Promise<ParentRun | null> {

@@ -285,6 +285,10 @@ async function deny(
   return { received: false, modelText };
 }
 
+/**
+ * Выдача только по agent_id этого запуска.
+ * Имя отдела из аргумента вызывающего не выбирает секрет: членства агента в отделе в базе нет.
+ */
 async function loadGranted(sql: Sql, request: ParsedRequest): Promise<SealedSecret | null> {
   const rows = await sql<SealedRow[]>`
     select s.ciphertext, s.nonce, s.salt
@@ -292,10 +296,7 @@ async function loadGranted(sql: Sql, request: ParsedRequest): Promise<SealedSecr
     join connector_secret_grants g on g.secret_id = s.id
     where s.tenant_id = ${request.tenantId}
       and s.name = ${request.secretName}
-      and (
-        g.agent_id = ${request.agentId}
-        or g.department = ${request.department}
-      )
+      and g.agent_id = ${request.agentId}
     limit 1
   `;
   const row = rows[0];

@@ -10,6 +10,12 @@ import { isUuid } from "./ids.js";
 const INT8_MIN = -9223372036854775808n;
 const INT8_MAX = 9223372036854775807n;
 
+/**
+ * Потолок ожидающих сообщений на пару агент и чат.
+ * Одно сообщение уже не длиннее 8000 символов; без числа строк буфер рос, пока жив один запуск.
+ */
+export const DIALOG_BUFFER_LIMIT = 8;
+
 export interface DialogMessage {
   tenantId: string;
   agentId: string;
@@ -50,22 +56,46 @@ export async function saveDialogMessage(sql: Sql, message: DialogMessage): Promi
   const chatId = requireChat(message.chatId);
   const idempotencyKey = requireKey(message.idempotencyKey);
   const text = requireMessage(message.message);
-  await sql`
-    insert into dialog_buffer (
-      tenant_id,
-      agent_id,
-      chat_id,
-      idempotency_key,
-      message
-    ) values (
-      ${tenantId},
-      ${agentId},
-      ${sql.types.chat_id(chatId)},
-      ${idempotencyKey},
-      ${text}
-    )
-    on conflict (agent_id, idempotency_key) do nothing
-  `;
+  const lockKey = `${agentId}:${chatId}`;
+  await sql.begin(async (tx) => {
+    // Один чат за раз: два параллельных insert не проскакивают потолок оба.
+    await tx`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+    const existing = await tx<{ id: string }[]>`
+      select id
+      from dialog_buffer
+      where agent_id = ${agentId}
+        and idempotency_key = ${idempotencyKey}
+      limit 1
+    `;
+    if (existing.length === 1) {
+      return;
+    }
+    const counted = await tx<{ count: number }[]>`
+      select count(*)::int as count
+      from dialog_buffer
+      where agent_id = ${agentId}
+        and chat_id = ${tx.types.chat_id(chatId)}
+    `;
+    const count = counted[0]?.count;
+    if (typeof count !== "number" || !Number.isSafeInteger(count) || count >= DIALOG_BUFFER_LIMIT) {
+      throw new TelegramError("buffer_full", "dialog buffer is full");
+    }
+    await tx`
+      insert into dialog_buffer (
+        tenant_id,
+        agent_id,
+        chat_id,
+        idempotency_key,
+        message
+      ) values (
+        ${tenantId},
+        ${agentId},
+        ${tx.types.chat_id(chatId)},
+        ${idempotencyKey},
+        ${text}
+      )
+    `;
+  });
 }
 
 export async function hasPendingDialog(

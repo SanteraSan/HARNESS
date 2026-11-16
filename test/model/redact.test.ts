@@ -15,6 +15,19 @@ describe("redact", () => {
     expect(redact(`x ${secret} y`, [secret])).toBe(`x ${REDACTED} y`);
   });
 
+  it("должен маскировать ключ AIza и ключ сейфа из списка", () => {
+    const google = `AIza${"a".repeat(35)}`;
+    const vault = "fixture-connector-key-value";
+    const text = `ключ ${google} сейф ${vault}`;
+    expect(redact(text, collectSecrets({
+      databaseUrl: "postgres://harness:test-secret-value@127.0.0.1:5442/harness",
+      litellmApiKey: "",
+      harnessApiToken: "",
+      telegramBotToken: "",
+      connectorSecretsKey: vault,
+    }))).toBe(`ключ ${REDACTED} сейф ${REDACTED}`);
+  });
+
   it("должен маскировать Bearer, ключ sk- и токен Telegram без списка", () => {
     const prefix = "a".repeat(5_000);
     const text = `${prefix} Bearer test-token sk-testsecretvalue 123456789:AAHtestsecretvalue123456789012345 end`;

@@ -125,6 +125,16 @@ describe("LiteLLMChatModel", () => {
     );
   });
 
+  it("должен не писать ключ tools, когда список пуст", async () => {
+    await withServer({ status: 200, body: textCompletion("готово") }, async ({ baseUrl, requests }) => {
+      const model = new LiteLLMChatModel({ baseUrl, apiKey });
+      await model.complete(userInput());
+      const body = requests[0]?.body;
+      expect(body).toMatchObject({ model: "agent" });
+      expect(body).not.toHaveProperty("tools");
+    });
+  });
+
   it("должен оставить arguments строкой у одного tool call", async () => {
     await withServer(
       {

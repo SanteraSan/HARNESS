@@ -172,11 +172,12 @@ export class OpenAICompatRunner implements Runner {
             cost,
           );
           logger.info({ run_id: claimed.id, model: resolved.modelAlias, attempt }, "model request");
+          const external = externalTurn(resolved);
           return ctx.model.complete({
             model: resolved.modelAlias,
             temperature: 0,
-            messages,
-            tools,
+            messages: external ? messagesForExternal(messages) : messages,
+            tools: external ? [] : tools,
             maxTokens: agent.maxCompletionTokens,
           });
         },
@@ -196,6 +197,11 @@ export class OpenAICompatRunner implements Runner {
       const output = turnResult.value;
 
       const interpreted = interpretModelOutput(output);
+      if (externalTurn(resolved) && interpreted.type !== "final" && interpreted.type !== "parse_error") {
+        // Внешний алиас инструменты не исполняет и второй вызов не делает.
+        await this.finishExternalToolCall(ctx, claimed.id, resolved, totals, cost);
+        return;
+      }
       if (interpreted.type === "final") {
         await this.finishFinal(ctx, claimed.id, resolved, totals, interpreted.text, cost);
         return;
@@ -356,6 +362,29 @@ export class OpenAICompatRunner implements Runner {
     await commitOutcome(ctx, runId, outcomeFor(resolved, totals, "failed", null, reason));
   }
 
+  private async finishExternalToolCall(
+    ctx: RunnerContext,
+    runId: string,
+    resolved: ResolvedAlias,
+    totals: TokenTotals,
+    cost: number | null,
+  ): Promise<void> {
+    await this.writeStep(
+      ctx,
+      {
+        ...baseStep(runId, "policy_deny"),
+        responseExcerpt: "external tool call refused",
+        error: "external_tool_call",
+      },
+      cost,
+    );
+    await commitOutcome(
+      ctx,
+      runId,
+      outcomeFor(resolved, totals, "failed", null, "external_tool_call"),
+    );
+  }
+
   private toolsForModel(allowlist: readonly string[], registry: readonly Tool[]): ModelToolSpec[] {
     const remote = this.services?.modelTools(allowlist) ?? [];
     if (remote.length === 0) {
@@ -380,7 +409,6 @@ export class OpenAICompatRunner implements Runner {
     cost: number | null,
     seenEffects: ToolEffect[],
   ): Promise<boolean> {
-    noteCalledEffects(calls, ctx.tools, seenEffects);
     messages.push({
       role: "assistant",
       content: content === null ? null : this.mask(content),
@@ -430,6 +458,7 @@ export class OpenAICompatRunner implements Runner {
         call,
         toolContext,
         cost,
+        seenEffects,
       );
       if (visible === null) {
         return false;
@@ -446,6 +475,7 @@ export class OpenAICompatRunner implements Runner {
     call: ToolCall,
     toolContext: ToolContext,
     cost: number | null,
+    seenEffects: ToolEffect[],
   ): Promise<string | null> {
     const parsed = parseArguments(call.arguments);
     if (!parsed.ok) {
@@ -454,6 +484,8 @@ export class OpenAICompatRunner implements Runner {
       return visible;
     }
 
+    // Эффект только после allowlist и старта execute. Отказ политики алиас не меняет.
+    seenEffects.push(tool.effect);
     if (this.services?.has(call.name) === true) {
       const outcome = await this.services.execute({
         runId: claimed.id,
@@ -598,26 +630,32 @@ export class OpenAICompatRunner implements Runner {
   }
 }
 
-function noteCalledEffects(
-  calls: readonly ToolCall[],
-  tools: readonly Tool[],
-  seenEffects: ToolEffect[],
-): void {
-  for (const call of calls) {
-    const tool = findNamedTool(call.name, tools);
-    if (tool !== undefined) {
-      seenEffects.push(tool.effect);
-    }
-  }
+/** Алиас шлюза или provider external: инструментов нет и результаты чтения не уходят. */
+function externalTurn(resolved: ResolvedAlias): boolean {
+  return resolved.modelAlias === "coder-cloud" || resolved.provider === "external";
 }
 
-function findNamedTool(name: string, tools: readonly Tool[]): Tool | undefined {
-  for (const tool of tools) {
-    if (tool.name === name) {
-      return tool;
+/**
+ * Внешний ход получает системный промпт и реплики человека.
+ * Результаты инструментов и аргументы вызовов в запрос не входят.
+ */
+function messagesForExternal(messages: readonly ModelMessage[]): ModelMessage[] {
+  const kept: ModelMessage[] = [];
+  for (const message of messages) {
+    if (message.role === "tool") {
+      continue;
     }
+    if (message.toolCalls !== null && message.toolCalls.length > 0) {
+      continue;
+    }
+    kept.push({
+      role: message.role,
+      content: message.content,
+      toolCallId: null,
+      toolCalls: null,
+    });
   }
-  return undefined;
+  return kept;
 }
 
 /** Локальный ход всегда 0. У внешнего хода число берётся из ответа, иначе null. */

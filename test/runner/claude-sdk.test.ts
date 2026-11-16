@@ -73,7 +73,7 @@ describe("ClaudeSdkRunner", () => {
     });
   });
 
-  it("должен выбрать вторую реализацию, когда resolveModel вернул external", async () => {
+  it("должен оставить OpenAI-совместимый раннер, когда resolveModel вернул external", async () => {
     await sql.file(path.resolve(import.meta.dirname, "../../seed/route_rules.sql"));
     const prior = await queue.enqueue(enqueueInput("prior-parse"));
     const locked = await queue.claimNext(WORKER_ID, 120);
@@ -115,18 +115,18 @@ describe("ClaudeSdkRunner", () => {
     const created = await queue.enqueue(enqueueInput("external-turn"));
     const claims = await drive(seen.selection);
 
-    expect(seen.created()).toBe(1);
-    expect(seen.built).toBeInstanceOf(ClaudeSdkRunner);
-    expect(seen.sdkIds).toEqual([created.run.id]);
-    expect(seen.localIds).toEqual([]);
+    expect(seen.created()).toBe(0);
+    expect(seen.built).toBeUndefined();
+    expect(seen.sdkIds).toEqual([]);
+    expect(seen.localIds).toEqual([created.run.id]);
     expect(claims.filter((id) => id.length > 0)).toEqual([created.run.id]);
 
     const row = await storedRun(created.run.id);
     expect(row).toMatchObject({
       status: "succeeded",
       attempt: 1,
-      final_text: "внешний ход",
-      provider: "external",
+      final_text: "локальный ход",
+      provider: "local",
     });
     const previous = await storedRun(prior.run.id);
     expect(previous.status).toBe("failed");
@@ -159,7 +159,8 @@ describe("ClaudeSdkRunner", () => {
     expect(runnerSource.includes("claude-agent-sdk")).toBe(false);
     expect(workerSource.includes("@anthropic-ai")).toBe(false);
     expect(workerSource.includes("claude-agent-sdk")).toBe(false);
-    expect(workerSource.includes("runner/claude-sdk")).toBe(true);
+    expect(workerSource.includes("runner/claude-sdk")).toBe(false);
+    expect(workerSource.includes("ClaudeSdkRunner")).toBe(false);
     expect(workerSource.match(/claimNext\(/g)).toHaveLength(1);
   });
 });
