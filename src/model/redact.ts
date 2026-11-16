@@ -16,6 +16,8 @@ export interface RedactSecretsSource {
   litellmApiKey: string;
   harnessApiToken: string;
   telegramBotToken: string;
+  /** Ключ сейфа. Пустая строка — сейф в этом процессе не включён. */
+  connectorSecretsKey?: string | null;
 }
 
 interface TextRange {
@@ -34,6 +36,7 @@ export function collectSecrets(source: RedactSecretsSource): readonly string[] {
     source.litellmApiKey,
     source.harnessApiToken,
     source.telegramBotToken,
+    source.connectorSecretsKey ?? "",
   ]);
 }
 
@@ -117,7 +120,12 @@ function collectPatternRanges(slice: string, offset: number, ranges: TextRange[]
 
 /** Шаблоны литеральные, квантификатор на тексте не шире {1,200} и не голый. */
 function patternSources(): readonly RegExp[] {
-  return [/Bearer [!-~]{1,200}/g, /sk-[A-Za-z0-9_-]{1,200}/g, /\d{1,20}:[A-Za-z0-9_-]{30,200}/g];
+  return [
+    /Bearer [!-~]{1,200}/g,
+    /sk-[A-Za-z0-9_-]{1,200}/g,
+    /\d{1,20}:[A-Za-z0-9_-]{30,200}/g,
+    /AIza[0-9A-Za-z_-]{35}/g,
+  ];
 }
 
 function applyRanges(text: string, ranges: readonly TextRange[]): string {

@@ -91,7 +91,7 @@ interface WireRequest {
   temperature: 0;
   max_tokens: number;
   messages: WireMessage[];
-  tools: WireTool[];
+  tools?: WireTool[];
 }
 
 interface CappedText {
@@ -221,13 +221,17 @@ function resolveCompletionsUrl(baseUrl: string): URL {
 }
 
 function buildPayload(input: ModelInput): WireRequest {
-  return {
+  const payload: WireRequest = {
     model: input.model,
     temperature: 0,
     max_tokens: requireCompletionTokens(input.maxTokens),
     messages: input.messages.map(toWireMessage),
-    tools: input.tools.map(toWireTool),
   };
+  // Пустой массив тоже предлагает модели вызвать инструмент. Ключ тогда не пишем.
+  if (input.tools.length > 0) {
+    payload.tools = input.tools.map(toWireTool);
+  }
+  return payload;
 }
 
 /** Вне диапазона миграции запрос не уходит: иначе шлюз снова пишет без предела. */
@@ -360,7 +364,8 @@ function postJson(
         return;
       }
       settled = true;
-      reject(error);
+      // Причина отказа промиса — Error: сокет отдаёт Error, прочее не тащим в reject.
+      reject(error instanceof Error ? error : new Error("model transport failed"));
     };
     const succeed = (response: Response): void => {
       if (settled) {

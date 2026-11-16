@@ -31,32 +31,40 @@ ss -ltn | grep -E '127.0.0.1:5442|127.0.0.1:4000|127.0.0.1:11434'
 
 ## Базы
 
-Один раз, на уже поднятом Postgres `127.0.0.1:5442`. Пользователь и пароль — из `LITELLM_DATABASE_URL` в `/home/santera/dev-ai-stack/.env` (пользователь `devai`, тот же пароль в `PG_PASSWORD`). В команду создания пароль не входит: `psql` идёт внутри контейнера, как создание `devmem_test` в README стека.
+Один раз, на уже поднятом Postgres `127.0.0.1:5442`. Роль приложения `harness` имеет `CONNECT` только к базе `harness`. Роль тестов — только к базе, имя которой кончается на `_test`. Пароль LiteLLM и роль `devai` в `.env` HARNESS не используются. Пока отдельные роли не созданы, работа через общего `devai` — известный дырявый предел, не норма: процесс HARNESS тогда читает и базу шлюза.
 
-```bash
-cd /home/santera/dev-ai-stack
-docker compose exec -T postgres psql -U devai -d postgres -c 'create database harness;'
-docker compose exec -T postgres psql -U devai -d postgres -c 'create database harness_test;'
+Базы и роли создаёт суперпользователь кластера. Пароль в этот файл не пишется. Имя тестовой базы кончается на `_test`.
+
+```sql
+create role harness login password 'замените';
+create role harness_test login password 'замените';
+create database harness owner harness;
+create database harness_test owner harness_test;
+revoke all on database harness from public;
+revoke all on database harness_test from public;
+grant connect on database harness to harness;
+grant connect on database harness_test to harness_test;
 ```
 
-SQL из плана: `create database harness` и `create database harness_test`. Имя тестовой базы кончается на `_test`. Ответ «уже существует» на повторной подготовке значит, что шаг уже сделан.
+`harness` не получает `CONNECT` к базе шлюза и к `harness_test`. `harness_test` не получает `CONNECT` к `harness`. Ответ «уже существует» на повторной подготовке значит, что шаг уже сделан.
 
-В локальном `.env` HARNESS те же пользователь и пароль, другие имена баз:
+В локальном `.env` HARNESS свои роли, не пользователь стека:
 
 ```text
-DATABASE_URL=postgres://devai:<пароль из LITELLM_DATABASE_URL>@127.0.0.1:5442/harness
-HARNESS_TEST_DATABASE_URL=postgres://devai:<пароль из LITELLM_DATABASE_URL>@127.0.0.1:5442/harness_test
+DATABASE_URL=postgres://harness:<пароль роли harness>@127.0.0.1:5442/harness
+HARNESS_TEST_DATABASE_URL=postgres://harness_test:<пароль роли harness_test>@127.0.0.1:5442/harness_test
 ```
 
-Символы `@`, `:`, `/`, `#`, `?`, `%` в пароле кодируются в URL. Расширение `pgcrypto` создаёт `npm run migrate`.
+Символы `@`, `:`, `/`, `#`, `?`, `%` в пароле кодируются в URL. Расширение `pgcrypto` создаёт `npm run migrate`. `FILE_ROOT` остаётся `./workspace`: корень репозитория, домашний каталог и каталог с `.env` воркер не примет.
 
 ## Переменные, без которых API и воркер не доходят до ответа
 
 | Переменная | Значение M1 |
 | --- | --- |
-| `DATABASE_URL` | база `harness`, пользователь и пароль из строки стека |
-| `HARNESS_TEST_DATABASE_URL` | база `harness_test` |
+| `DATABASE_URL` | база `harness`, роль `harness` |
+| `HARNESS_TEST_DATABASE_URL` | база `harness_test`, роль `harness_test` |
 | `LITELLM_BASE_URL` | `http://127.0.0.1:4000/v1` |
+| `LITELLM_ALLOWED_HOSTS` | пусто, пока шлюз на `127.0.0.1` |
 | `LITELLM_API_KEY` | готовый ключ стека с моделью `agent` |
 | `HARNESS_API_TOKEN` | свой bearer; в примерах плейсхолдер `test-secret-value` |
 | `AGENT_SLUG` | `clerk` |

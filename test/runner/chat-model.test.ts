@@ -89,14 +89,40 @@ describe("chat model run", () => {
     expect(watched.reads()).toBe(1);
     expect(driven.externalCalls).toBe(0);
     expect(model.inputs.map((input) => input.model)).toEqual(["coder-cloud"]);
-    expect(model.inputs[0]?.tools.map((tool) => tool.name)).toEqual(ALLOWLIST);
-    expect(model.inputs[0]?.tools.map((tool) => tool.name)).not.toContain("create_subtask");
+    expect(model.inputs[0]?.tools).toEqual([]);
+    expect(model.inputs[0]?.messages.some((message) => message.role === "tool")).toBe(false);
     const row = await storedRun(runId);
     expect(row).toMatchObject({
       status: "succeeded",
       model_alias: "coder-cloud",
       provider: "local",
       final_text: "из облака",
+    });
+  });
+
+  it("должен после /cloud не исполнять tool_calls и не звать модель второй раз", async () => {
+    await saveChatModelChoice(sql, CHAT, "coder-cloud");
+    const runId = await enqueue("telegram", "ход с инструментом");
+    const model = scripted({
+      content: null,
+      toolCalls: [{ id: "call-1", name: "read_file", arguments: "{\"path\":\"note.txt\"}" }],
+      promptTokens: 1,
+      completionTokens: 1,
+      model: "reported",
+    });
+    const driven = await drain(sql, model);
+
+    expect(driven.externalCalls).toBe(0);
+    expect(model.inputs).toHaveLength(1);
+    expect(model.inputs[0]?.tools).toEqual([]);
+    expect(model.inputs[0]?.messages.some((message) => message.role === "tool")).toBe(false);
+    const row = await storedRun(runId);
+    expect(row).toMatchObject({
+      status: "failed",
+      error: "external_tool_call",
+      final_text: null,
+      model_alias: "coder-cloud",
+      provider: "local",
     });
   });
 
@@ -319,11 +345,12 @@ interface StoredRun {
   model_alias: string | null;
   provider: string | null;
   final_text: string | null;
+  error: string | null;
 }
 
 async function storedRun(runId: string): Promise<StoredRun> {
   const rows = await sql<StoredRun[]>`
-    select status, model_alias, provider, final_text
+    select status, model_alias, provider, final_text, error
     from runs
     where id = ${runId}
   `;

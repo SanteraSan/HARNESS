@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import * as config from "../../src/config.js";
 import type { ToolContext, ToolOutcome } from "../../src/contracts/types.js";
-import { createDelegationTools, type DelegationTools } from "../../src/delegation/index.js";
+import {
+  MAX_CHILDREN_PER_PARENT,
+  createDelegationTools,
+  type DelegationTools,
+} from "../../src/delegation/index.js";
 import { LiteLLMChatModel } from "../../src/model/litellm.js";
 import { QueueError, createRunQueue } from "../../src/queue/index.js";
 import { sql } from "../helpers/db.js";
@@ -354,6 +358,50 @@ describe("delegation", () => {
       }),
     ).rejects.toMatchObject({ code: "23503" });
     expect(await countRuns()).toBe(0);
+  });
+
+  it("должен не создавать внука и остановиться на потолке детей", async () => {
+    const parentId = await enqueueParent("parent-depth");
+    const child = await tools.createSubtask.execute(
+      { message: "ребёнок", idempotency_key: "depth-child" },
+      toolContext(parentId),
+    );
+    const childId = queuedRunId(child);
+    const grandchild = await tools.createSubtask.execute(
+      { message: "внук", idempotency_key: "depth-grand" },
+      toolContext(childId),
+    );
+    expect(grandchild).toEqual({ ok: false, error: "delegation depth" });
+    const nested = await sql<{ count: number }[]>`
+      select count(*)::int as count from runs where parent_run_id = ${childId}
+    `;
+    expect(nested[0]?.count).toBe(0);
+
+    const fanoutParent = await enqueueParent("parent-fanout");
+    for (let index = 0; index < MAX_CHILDREN_PER_PARENT; index += 1) {
+      const outcome = await tools.createSubtask.execute(
+        { message: `дело ${index}`, idempotency_key: `fan-${index}` },
+        toolContext(fanoutParent),
+      );
+      expect(outcome.ok).toBe(true);
+    }
+    const replay = await tools.createSubtask.execute(
+      {
+        message: `дело ${MAX_CHILDREN_PER_PARENT - 1}`,
+        idempotency_key: `fan-${MAX_CHILDREN_PER_PARENT - 1}`,
+      },
+      toolContext(fanoutParent),
+    );
+    expect(replay.ok).toBe(true);
+    const extra = await tools.createSubtask.execute(
+      { message: "лишнее", idempotency_key: "fan-extra" },
+      toolContext(fanoutParent),
+    );
+    expect(extra).toEqual({ ok: false, error: "delegation fanout" });
+    const children = await sql<{ count: number }[]>`
+      select count(*)::int as count from runs where parent_run_id = ${fanoutParent}
+    `;
+    expect(children[0]?.count).toBe(MAX_CHILDREN_PER_PARENT);
   });
 
   it("должен не импортировать клиент модели и не читать токен бота", async () => {

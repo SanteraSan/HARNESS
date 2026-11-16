@@ -19,12 +19,11 @@ import { createRunJournal, type RunJournal } from "./journal/index.js";
 import { MAX_COMPLETION_TOKENS } from "./model/limits.js";
 import { LiteLLMChatModel, collectSecrets } from "./model/index.js";
 import { createModelSlots, createRunQueue, type ModelSlots } from "./queue/index.js";
-import { ClaudeSdkRunner, unavailableClaudeSdkClient } from "./runner/claude-sdk.js";
 import { OpenAICompatRunner, type RunnerAgent } from "./runner/index.js";
 import { runModelTurn, type ModelTurnOptions } from "./runner/model-turn.js";
 import { type ChatModelAlias } from "./runner/openai-compat.js";
-import { resolveModel } from "./routing/resolve.js";
 import { createServiceCatalog, maintainServiceRows } from "./services/index.js";
+import { assertFileRoot } from "./tools/file-root.js";
 import { toolRegistry } from "./tools/index.js";
 
 /** Пустая очередь: одна секунда, затем снова reap и один захват. */
@@ -38,12 +37,16 @@ const RUNNER_FAILED = "runner_failed";
 /**
  * Две реализации на один захват.
  * Нет поля — остаётся единственный runner из опций: тесты M1 подставляют один объект.
- * Процесс воркера поле задаёт и на каждом захвате зовёт resolveModel.
+ * Процесс воркера поле задаёт. Класс раннера от provider не зависит:
+ * external — алиас LiteLLM внутри OpenAI-совместимого раннера, не Claude SDK.
  */
 export interface RunnerSelection {
   /** Уже созданный OpenAI-совместимый раннер. Для local новый объект не строится. */
   local: Runner;
-  /** Вызывается только когда resolveModel вернул external. */
+  /**
+   * Не вызывается. SDK-раннер не выбирается, пока нет отдельного поля
+   * и песочница не подключена к самому ходу.
+   */
   createExternal(): Runner;
   loadAgent(agentId: string): Promise<RunnerAgent>;
   sql: Sql;
@@ -287,11 +290,9 @@ async function runSdkUnderSlot(
 }
 
 /**
- * I1: модель остаётся за Runner. Провайдер берётся из resolveModel этого запуска.
- * На захвате эффектов инструментов ещё нет, поэтому смена алиаса внутри хода
- * остаётся в OpenAICompatRunner. Второй захват отсюда не делается.
- * local не вызывает createExternal: SDK-раннер для него не создаётся.
- * Выбор чата в этот выбор не входит: он не меняет provider захвата.
+ * I1: модель остаётся за Runner. Алиас шлюза выбирает OpenAICompatRunner.
+ * provider = external не переключает класс раннера: пакета SDK нет,
+ * а песочница к этому ходу не подключена. parse_error раннер не меняет.
  */
 async function selectRunner(options: WorkerLoopOptions, claimed: ClaimedRun): Promise<Runner> {
   const selection = options.selection;
@@ -303,27 +304,13 @@ async function selectRunner(options: WorkerLoopOptions, claimed: ClaimedRun): Pr
   if (agent.id !== claimed.agentId) {
     throw new WorkerError("agent_mismatch", "agent does not match the run");
   }
-
-  const resolved = await resolveModel(
-    selection.sql,
-    {
-      id: agent.id,
-      tenantId: claimed.tenantId,
-      modelAlias: agent.modelAlias,
-      provider: agent.provider,
-    },
-    { toolEffects: [] },
-  );
-  if (resolved.provider === "local") {
-    return selection.local;
-  }
-  return selection.createExternal();
+  return selection.local;
 }
 
 /**
  * Воркер читает выбор и передаёт алиас в уже выбранный OpenAI-совместимый раннер.
- * API, cron и delegation до запроса не доходят. Выбор не создаёт ClaudeSdkRunner:
- * selectRunner уже взял реализацию по provider, а чат этот provider не меняет.
+ * API, cron и delegation до запроса не доходят. Захват не подменяет класс раннера:
+ * provider = external остаётся алиасом LiteLLM на том же клиенте.
  */
 async function passChatModelAlias(
   options: WorkerLoopOptions,
@@ -642,6 +629,7 @@ function workerLoopOptions(
       litellmApiKey: config.litellmApiKey,
       harnessApiToken: config.harnessApiToken,
       telegramBotToken: config.telegramBotToken,
+      connectorSecretsKey: config.connectorSecretsKey,
     }),
     ...(services?.redactSecrets ?? []),
   ];
@@ -667,8 +655,6 @@ function workerLoopOptions(
     sql,
     services: catalog,
   });
-  // Пакет SDK не установлен: клиент передаётся снаружи класса и живёт только для external.
-  const sdkClient = unavailableClaudeSdkClient();
   return {
     queue,
     journal: createRunJournal(sql, secrets),
@@ -681,7 +667,7 @@ function workerLoopOptions(
     selection: {
       local: localRunner,
       createExternal(): Runner {
-        return new ClaudeSdkRunner({ client: sdkClient });
+        throw new WorkerError("sdk_runner_unavailable", "claude sdk runner is not selectable");
       },
       loadAgent(agentId: string): Promise<RunnerAgent> {
         return loadRunnerAgent(sql, agentId);
@@ -709,6 +695,7 @@ async function ensureFileRoot(fileRoot: string): Promise<void> {
   // Корень задаёт конфигурация процесса. Текст модели сюда не приходит.
   // eslint-disable-next-line security/detect-non-literal-fs-filename -- FILE_ROOT из конфига
   await mkdir(root, { recursive: true });
+  await assertFileRoot(root);
 }
 
 function installProcessGuards(): void {
