@@ -63,6 +63,14 @@ describe("loadConfig", () => {
     );
     expect(allowed.litellmBaseUrl).toBe("https://models.example/v1");
     expect(allowed.litellmAllowedHosts).toEqual(["models.example"]);
+    expect(() =>
+      loadConfig(
+        baseEnv({
+          LITELLM_BASE_URL: "http://models.example/v1",
+          LITELLM_ALLOWED_HOSTS: "models.example",
+        }),
+      ),
+    ).toThrow(ConfigError);
   });
 
   it("должен отказать без DATABASE_URL и не включить секрет в текст ошибки", () => {

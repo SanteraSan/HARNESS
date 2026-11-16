@@ -301,6 +301,10 @@ function assertLitellmBaseUrl(value: string, allowedHosts: readonly string[]): v
   if (host === "127.0.0.1") {
     return;
   }
+  // Чужой хост только по HTTPS: список имён не шифрует ключ и текст хода.
+  if (url.protocol !== "https:") {
+    throw new ConfigError(["LITELLM_BASE_URL"]);
+  }
   const allowed = new Set(allowedHosts);
   if (!allowed.has(host)) {
     throw new ConfigError(["LITELLM_BASE_URL"]);

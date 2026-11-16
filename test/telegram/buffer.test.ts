@@ -60,6 +60,37 @@ describe("dialogBuffer", () => {
     expect(await countBuffer()).toBe(DIALOG_BUFFER_LIMIT);
   });
 
+  it("должен пустить только одно из двух одновременных сообщений на границе потолка", async () => {
+    const chatId = requiredChat();
+    for (let index = 0; index < DIALOG_BUFFER_LIMIT - 1; index += 1) {
+      await saveDialogMessage(sql, {
+        tenantId: "local",
+        agentId: AGENT_ID,
+        chatId,
+        idempotencyKey: `race-${index}`,
+        message: `текст ${index}`,
+      });
+    }
+    const pending = ["race-a", "race-b"].map((idempotencyKey) =>
+      saveDialogMessage(sql, {
+        tenantId: "local",
+        agentId: AGENT_ID,
+        chatId,
+        idempotencyKey,
+        message: idempotencyKey,
+      }),
+    );
+    const results = await Promise.allSettled(pending);
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({
+      status: "rejected",
+      reason: { name: "TelegramError", code: "buffer_full" },
+    });
+    expect(await countBuffer()).toBe(DIALOG_BUFFER_LIMIT);
+  });
+
   it("должен ответить отказом, когда буфер занятого чата уже полон", async () => {
     const chatId = requiredChat();
     const queue = createRunQueue(sql);

@@ -114,9 +114,13 @@ async function createSubtask(
   if (depth >= MAX_DELEGATION_DEPTH) {
     return failed("delegation depth");
   }
-  const children = await childCount(deps.sql, ctx.runId);
-  if (children >= MAX_CHILDREN_PER_PARENT) {
-    return failed("delegation fanout");
+  // Повтор ключа уже принятого ребёнка не считается новым ребёнком.
+  const replay = await existingChild(deps.sql, ctx.runId, parent.agentId, request.idempotencyKey);
+  if (replay === null) {
+    const children = await childCount(deps.sql, ctx.runId);
+    if (children >= MAX_CHILDREN_PER_PARENT) {
+      return failed("delegation fanout");
+    }
   }
 
   const result = await deps.queue.enqueue({
@@ -197,6 +201,23 @@ async function delegationDepth(sql: Sql, runId: string): Promise<number> {
     current = parentId;
   }
   return depth;
+}
+
+async function existingChild(
+  sql: Sql,
+  parentRunId: string,
+  agentId: string,
+  idempotencyKey: string,
+): Promise<string | null> {
+  const rows: { id: string }[] = await sql<{ id: string }[]>`
+    select id
+    from runs
+    where parent_run_id = ${parentRunId}
+      and agent_id = ${agentId}
+      and idempotency_key = ${idempotencyKey}
+    limit 1
+  `;
+  return rows[0]?.id ?? null;
 }
 
 async function childCount(sql: Sql, runId: string): Promise<number> {

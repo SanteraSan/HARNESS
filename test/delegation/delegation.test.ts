@@ -385,6 +385,14 @@ describe("delegation", () => {
       );
       expect(outcome.ok).toBe(true);
     }
+    const replay = await tools.createSubtask.execute(
+      {
+        message: `дело ${MAX_CHILDREN_PER_PARENT - 1}`,
+        idempotency_key: `fan-${MAX_CHILDREN_PER_PARENT - 1}`,
+      },
+      toolContext(fanoutParent),
+    );
+    expect(replay.ok).toBe(true);
     const extra = await tools.createSubtask.execute(
       { message: "лишнее", idempotency_key: "fan-extra" },
       toolContext(fanoutParent),
