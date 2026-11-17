@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { ModelOutput, ModelToolSpec, RunnerContext } from "../../src/contracts/types.js";
+import { loadConfig } from "../../src/config.js";
+import { type Sql, createSql } from "../../src/db/client.js";
 import { createRunJournal } from "../../src/journal/index.js";
 import { createModelSlots, createRunQueue } from "../../src/queue/index.js";
 import { OpenAICompatRunner } from "../../src/runner/index.js";
@@ -168,6 +170,84 @@ describe("model slot turn", () => {
     expect(stored.final_text).toBeNull();
     expect(stored.final_text).not.toBe("не-успех");
   });
+
+  it("должен не отдавать слот второму соединению, пока отменённый вызов не остановился", async () => {
+    await insertSlot();
+    const created = await enqueue("turn-hold");
+    const other = await enqueue("turn-hold-other");
+    const claimed = mustClaim(await queue.claimNext(WORKER_ID, 30));
+    const waiter = mustClaim(await queue.claimNext("worker-other", 30));
+    expect(claimed.id).toBe(created.run.id);
+    expect(waiter.id).toBe(other.run.id);
+
+    let releaseCall: (() => void) | undefined;
+    let sawAbort = false;
+    let entered = false;
+    const runner = new OpenAICompatRunner({
+      loadAgent: () => loadRunnerAgent(sql, AGENT_ID),
+      fileRoot: "./workspace",
+      secrets: [],
+    });
+    runner.assignModelTurn({
+      slots: createModelSlots(sql),
+      heartbeatSeconds: 1,
+      signal: new AbortController().signal,
+      sleep: () => Promise.reject(new Error("slot wait must not run")),
+    });
+
+    const running = runner.run(
+      claimed,
+      context({
+        complete: (input) =>
+          new Promise((_resolve, reject) => {
+            releaseCall = () => {
+              reject(new Error("call stopped"));
+            };
+            input.signal?.addEventListener(
+              "abort",
+              () => {
+                sawAbort = true;
+              },
+              { once: true },
+            );
+            entered = true;
+          }),
+      }),
+    );
+
+    try {
+      await waitUntil(() => entered, 2_000);
+      expect((await slotLock()).locked_by).toBe(WORKER_ID);
+      await sql`
+        update runs
+        set locked_by = null, locked_until = null
+        where id = ${claimed.id}
+      `;
+      await waitUntil(() => sawAbort, 4_000);
+      const leasedAt = await slotUntil();
+      await waitUntil(async () => {
+        const later = await slotUntil();
+        return leasedAt !== null && later !== null && later.getTime() > leasedAt.getTime();
+      }, 3_000);
+
+      await withTwoConnections(async (left, right) => {
+        await createModelSlots(left).reapExpired();
+        expect(await createModelSlots(right).claim("worker-other", waiter.id, 30)).toBeNull();
+      });
+      expect((await slotLock()).locked_by).toBe(WORKER_ID);
+    } finally {
+      releaseCall?.();
+      await running;
+    }
+
+    expect((await slotLock()).locked_by).toBeNull();
+    const stored = await storedRun(claimed.id);
+    expect(stored.status).not.toBe("succeeded");
+    expect(stored.final_text).toBeNull();
+    await withTwoConnections(async (_left, right) => {
+      expect(await createModelSlots(right).claim("worker-other", waiter.id, 30)).toBe(1);
+    });
+  });
 });
 
 function enqueue(idempotencyKey: string) {
@@ -205,6 +285,53 @@ function mustClaim<T>(value: T | null): T {
     throw new Error("claim is missing");
   }
   return value;
+}
+
+async function slotUntil(): Promise<Date | null> {
+  const rows = await sql<{ locked_until: Date | null }[]>`
+    select locked_until from model_slots where slot_index = 1
+  `;
+  return rows[0]?.locked_until ?? null;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+async function waitUntil(
+  ready: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await ready()) {
+      return;
+    }
+    if (Date.now() > deadline) {
+      throw new Error("wait timed out");
+    }
+    await delay(20);
+  }
+}
+
+async function withTwoConnections(body: (left: Sql, right: Sql) => Promise<void>): Promise<void> {
+  const databaseUrl = loadConfig().harnessTestDatabaseUrl;
+  if (databaseUrl === null) {
+    throw new Error("HARNESS_TEST_DATABASE_URL is required");
+  }
+  const left = createSql(databaseUrl);
+  const right = createSql(databaseUrl);
+  try {
+    await body(left, right);
+  } finally {
+    try {
+      await left.end({ timeout: 5 });
+    } finally {
+      await right.end({ timeout: 5 });
+    }
+  }
 }
 
 async function slotLock(): Promise<{ locked_by: string | null; run_id: string | null }> {
