@@ -107,7 +107,9 @@ export async function executeServiceCall(input: ServiceCallInput): Promise<Servi
   const excerpt = `${input.tool.name} ${hash.toString("hex")}`;
   const timeoutMs = input.timeoutMs ?? (input.tool.effect === "write" ? WRITE_TIMEOUT_MS : READ_TIMEOUT_MS);
   const attempt = await send(input, bytes, timeoutMs);
-  if (input.tool.effect === "write" && (attempt.kind === "retry" || attempt.kind === "timeout")) {
+  // Запись: одна повторная отправка того же тела. Чтение второй отправки не делает.
+  // Пауза только у idempotency_in_progress. Обрыв и таймаут уходят сразу.
+  if (shouldRetryWrite(input.tool.effect, attempt)) {
     if (attempt.kind === "retry") {
       await delay(input.retryDelayMs ?? 1000);
     }
@@ -115,6 +117,16 @@ export async function executeServiceCall(input: ServiceCallInput): Promise<Servi
     return settle(input, invocationId, excerpt, second);
   }
   return settle(input, invocationId, excerpt, attempt);
+}
+
+function shouldRetryWrite(effect: ServiceTool["effect"], attempt: Attempt): boolean {
+  if (effect !== "write") {
+    return false;
+  }
+  if (attempt.kind === "retry" || attempt.kind === "timeout") {
+    return true;
+  }
+  return attempt.kind === "transport" && attempt.code === "connection_error";
 }
 
 async function settle(
@@ -261,7 +273,7 @@ async function send(input: ServiceCallInput, bytes: Buffer, timeoutMs: number): 
   }
   const text = received.text;
   if (response.status === 401) {
-    return { kind: "transport", code: "unauthorized", httpStatus: 401, bytes: text.length };
+    return { kind: "transport", code: "unauthorized", httpStatus: 401, bytes: received.bytes };
   }
   if (response.status === 409) {
     const reason = reasonOf(text);
@@ -272,17 +284,17 @@ async function send(input: ServiceCallInput, bytes: Buffer, timeoutMs: number): 
       kind: "transport",
       code: "idempotency_conflict",
       httpStatus: 409,
-      bytes: text.length,
+      bytes: received.bytes,
     };
   }
   if (response.status !== 200) {
-    return { kind: "transport", code: "http_error", httpStatus: response.status, bytes: text.length };
+    return { kind: "transport", code: "http_error", httpStatus: response.status, bytes: received.bytes };
   }
   const envelope = parseServiceEnvelope(text);
   if (!envelope.ok) {
-    return { kind: "transport", code: envelope.reason, httpStatus: 200, bytes: text.length };
+    return { kind: "transport", code: envelope.reason, httpStatus: 200, bytes: received.bytes };
   }
-  return { kind: "envelope", envelope: envelope.value, nonce, bytes: text.length };
+  return { kind: "envelope", envelope: envelope.value, nonce, bytes: received.bytes };
 }
 
 function headers(input: ServiceCallInput): Record<string, string> {
@@ -315,10 +327,12 @@ function nonceOf(bytes: Buffer): string {
   return "";
 }
 
-async function readLimited(response: Response): Promise<{ text: string } | { tooLarge: true }> {
+async function readLimited(
+  response: Response,
+): Promise<{ text: string; bytes: number } | { tooLarge: true }> {
   const reader = response.body?.getReader();
   if (reader === undefined) {
-    return { text: "" };
+    return { text: "", bytes: 0 };
   }
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -335,7 +349,10 @@ async function readLimited(response: Response): Promise<{ text: string } | { too
     }
     chunks.push(bytes);
   }
-  return { text: new TextDecoder("utf-8", { fatal: false }).decode(Buffer.concat(chunks)) };
+  return {
+    text: new TextDecoder("utf-8", { fatal: false }).decode(Buffer.concat(chunks)),
+    bytes: total,
+  };
 }
 
 function reasonOf(raw: string): string {

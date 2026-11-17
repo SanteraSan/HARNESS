@@ -7,6 +7,7 @@ import {
   ERROR_TEXT_MAX_CODE_POINTS,
   RESPONSE_BODY_LIMIT_BYTES,
   RESPONSE_TEXT_MAX_CODE_POINTS,
+  TOOL_CALL_ID_RE,
   TOOL_ERROR_CODES,
   UUID_RE,
 } from "../../contract/limits.js";
@@ -14,6 +15,13 @@ import {
 export const SERVICE_CONTRACT = "harness.tool.v2";
 
 const uuidSchema = z.string().regex(UUID_RE);
+
+const blobListSchema = z
+  .array(uuidSchema)
+  .max(8)
+  .refine((values) => new Set(values).size === values.length);
+
+const toolCallIdSchema = z.string().regex(TOOL_CALL_ID_RE);
 
 const errorCodeSchema = z.string().refine((value): value is (typeof TOOL_ERROR_CODES)[number] => {
   return (TOOL_ERROR_CODES as readonly string[]).includes(value);
@@ -26,10 +34,10 @@ const successSchema = z
     text: z.string().refine((value) => codePointLength(value) <= RESPONSE_TEXT_MAX_CODE_POINTS),
     truncated: z.boolean(),
     duration_ms: z.number().int().min(0).max(DURATION_MS_MAX),
-    blobs: z.array(uuidSchema).max(8),
+    blobs: blobListSchema,
     nonce: uuidSchema,
     run_id: uuidSchema,
-    tool_call_id: z.string().min(1).max(128),
+    tool_call_id: toolCallIdSchema,
     report: z.unknown().optional(),
   })
   .strict();
@@ -45,7 +53,7 @@ const failureSchema = z
     blobs: z.array(uuidSchema).max(0),
     nonce: uuidSchema,
     run_id: uuidSchema,
-    tool_call_id: z.string().min(1).max(128),
+    tool_call_id: toolCallIdSchema,
     report: z.unknown().optional(),
   })
   .strict();

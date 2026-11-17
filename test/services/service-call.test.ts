@@ -181,7 +181,7 @@ describe("service call", () => {
     });
   });
 
-  it("должен отдать годный text в модель при битом report и не заклинить идемпотентность", async () => {
+  it("должен отдать годный text в модель при битом report, поставить report_status = invalid и не заклинить идемпотентность", async () => {
     const runId = await insertRun();
     handler = async (req, res) => {
       json(res, 200, reply(await readRequest(req), { text: "годный", report: { has_model: false, extra: true } }));
@@ -257,22 +257,43 @@ describe("service call", () => {
     expect(rows[0]).toEqual({ status: "timeout", transport_code: "timeout" });
   });
 
-  it("должен на повтор того же ключа и хеша не подменить заявления", async () => {
+  it("должен на повтор того же ключа и хеша вернуть первый отчёт и не подменить заявления", async () => {
     const runId = await insertRun();
     const bodies: string[] = [];
+    let repeat = false;
     handler = async (req, res) => {
       const raw = await readRequest(req);
       bodies.push(raw);
-      if (bodies.length === 1) {
+      if (!repeat && bodies.length === 1) {
         json(res, 409, { reason: "idempotency_in_progress" });
         return;
       }
-      json(res, 200, reply(raw, { report: { has_model: false, claimed_prompt_tokens: 5 } }));
+      if (repeat) {
+        json(res, 200, reply(raw, { text: "второй", report: { has_model: false, claimed_prompt_tokens: 99 } }));
+        return;
+      }
+      json(res, 200, reply(raw, { text: "первый", report: { has_model: false, claimed_prompt_tokens: 5 } }));
     };
-    await call(runId, noteTool, { path: "out/a.txt", text: "hello", idempotency_key: "model-key" }, { retryDelayMs: 0 });
+    const first = await call(
+      runId,
+      noteTool,
+      { path: "out/a.txt", text: "hello", idempotency_key: "model-key" },
+      { retryDelayMs: 0 },
+    );
+    expect(first.text).toBe("первый");
     expect(bodies).toHaveLength(2);
     expect(bodies[0]).toBe(bodies[1]);
     expect(bodies[0]).not.toContain("idempotency_key");
+    repeat = true;
+    const second = await call(
+      runId,
+      noteTool,
+      { path: "out/a.txt", text: "hello", idempotency_key: "model-key" },
+      { retryDelayMs: 0 },
+    );
+    expect(second.text).toBe("первый");
+    expect(second.text).not.toContain("второй");
+    expect(bodies).toHaveLength(2);
     const row = await sql<{ claimed_prompt_tokens: number; count: string }[]>`
       select result.claimed_prompt_tokens, count(*)::text as count
       from service_results as result
@@ -281,6 +302,28 @@ describe("service call", () => {
       group by result.claimed_prompt_tokens
     `;
     expect(row).toEqual([{ claimed_prompt_tokens: 5, count: "1" }]);
+  });
+
+  it("должен один раз повторить обрыв записи тем же телом", async () => {
+    const runId = await insertRun();
+    const bodies: string[] = [];
+    handler = async (req, res) => {
+      const raw = await readRequest(req);
+      bodies.push(raw);
+      if (bodies.length === 1) {
+        res.destroy();
+        return;
+      }
+      json(res, 200, reply(raw, { text: "после обрыва" }));
+    };
+    const outcome = await call(runId, noteTool, { path: "out/a.txt", text: "hello" });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toBe(bodies[1]);
+    expect(outcome.text).toBe("после обрыва");
+    const rows = await sql<{ status: string; transport_code: string | null }[]>`
+      select status, transport_code from service_invocations where run_id = ${runId}
+    `;
+    expect(rows[0]).toEqual({ status: "completed", transport_code: null });
   });
 
   it("должен не менять runs.prompt_tokens заявленными токенами", async () => {
