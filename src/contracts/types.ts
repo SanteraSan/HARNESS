@@ -112,6 +112,11 @@ export interface ModelInput {
    * Значение одно: шлюз не получает числовой бюджет размышления.
    */
   reasoningEffort?: "none";
+  /**
+   * Отмена хода, когда лок запуска уже не наш.
+   * Клиент, который поле не читает, дожидается своего таймаута.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ModelOutput {

@@ -163,7 +163,9 @@ export class OpenAICompatRunner implements Runner {
         onSlotLost: async () => {
           await this.finishSlotLost(ctx, claimed.id, resolved);
         },
-        call: async () => {
+        // Потеря лока отменяет LiteLLM и держит слот, пока вызов не остановился.
+        holdUntilCallStops: true,
+        call: async (signal) => {
           requestStep = await this.writeStep(
             ctx,
             {
@@ -174,7 +176,7 @@ export class OpenAICompatRunner implements Runner {
           );
           logger.info({ run_id: claimed.id, model: resolved.modelAlias, attempt }, "model request");
           return ctx.model.complete(
-            modelInputFor(resolved, messages, tools, agent.maxCompletionTokens),
+            modelInputFor(resolved, messages, tools, agent.maxCompletionTokens, signal),
           );
         },
         afterHeld: async (output) => {
@@ -643,6 +645,7 @@ function modelInputFor(
   messages: readonly ModelMessage[],
   tools: readonly ModelToolSpec[],
   maxTokens: number,
+  signal?: AbortSignal,
 ): ModelInput {
   const external = externalTurn(resolved);
   const input: ModelInput = {
@@ -652,6 +655,9 @@ function modelInputFor(
     tools: external ? [] : tools,
     maxTokens,
   };
+  if (signal !== undefined) {
+    input.signal = signal;
+  }
   // Алиас agent поле не получает. none не снимаем: отказ шлюза не приводит к повторному вызову без него.
   if (resolved.modelAlias === "coder-cloud") {
     input.reasoningEffort = "none";
