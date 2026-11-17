@@ -368,8 +368,10 @@ function redactReport(value: Record<string, unknown>, secrets: readonly string[]
       return null;
     }
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    const masked = redactValue(descriptor?.value, secrets);
-    if (masked === null) {
+    const original: unknown = descriptor === undefined ? undefined : descriptor.value;
+    // Явный JSON null — заявление «числа нет». null из redactValue значит, что маска не удалась.
+    const masked = original === null ? null : redactValue(original, secrets);
+    if (masked === null && original !== null) {
       return null;
     }
     Object.defineProperty(copy, key, {
