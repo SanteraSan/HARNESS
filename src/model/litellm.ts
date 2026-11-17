@@ -92,6 +92,8 @@ interface WireRequest {
   max_tokens: number;
   messages: WireMessage[];
   tools?: WireTool[];
+  /** Пишется только если ход сам задал none. Отказ шлюза ключ не снимает. */
+  reasoning_effort?: "none";
 }
 
 interface CappedText {
@@ -230,6 +232,10 @@ function buildPayload(input: ModelInput): WireRequest {
   // Пустой массив тоже предлагает модели вызвать инструмент. Ключ тогда не пишем.
   if (input.tools.length > 0) {
     payload.tools = input.tools.map(toWireTool);
+  }
+  // Алиас agent поле не задаёт — ключа нет. none не выбрасываем и не подменяем бюджетом.
+  if (input.reasoningEffort === "none") {
+    payload.reasoning_effort = "none";
   }
   return payload;
 }

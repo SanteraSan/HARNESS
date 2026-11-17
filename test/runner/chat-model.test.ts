@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -38,6 +39,8 @@ const FILE_ROOT = path.join(tmpdir(), "harness-chat-model");
 const CHAT = 9223372036854775807n;
 const ALLOWLIST = ["read_file", "list_dir"];
 const QUIET_DIRS = ["api", "cron", "delegation"] as const;
+const NO_TOOLS_NOTE =
+  "В этом ходе инструментов нет. Ответь на вопрос сразу, не открывая файлы.";
 
 const queue = createRunQueue(sql);
 const journal = createRunJournal(sql, []);
@@ -71,6 +74,8 @@ describe("chat model run", () => {
     expect(driven.externalCalls).toBe(0);
     expect(model.inputs.map((input) => input.model)).toEqual(["agent"]);
     expect(model.inputs[0]?.tools.map((tool) => tool.name)).toEqual(ALLOWLIST);
+    expect(model.inputs[0]).not.toHaveProperty("reasoningEffort");
+    expect(systemText(model.inputs[0]).includes(NO_TOOLS_NOTE)).toBe(false);
     const row = await storedRun(runId);
     expect(row).toMatchObject({
       status: "succeeded",
@@ -90,7 +95,12 @@ describe("chat model run", () => {
     expect(driven.externalCalls).toBe(0);
     expect(model.inputs.map((input) => input.model)).toEqual(["coder-cloud"]);
     expect(model.inputs[0]?.tools).toEqual([]);
+    expect(model.inputs[0]?.reasoningEffort).toBe("none");
     expect(model.inputs[0]?.messages.some((message) => message.role === "tool")).toBe(false);
+    const agent = await loadRunnerAgent(sql, CLERK_ID);
+    const system = systemText(model.inputs[0]);
+    expect(system.startsWith(`${agent.systemPrompt}\n`)).toBe(true);
+    expect(system.endsWith(NO_TOOLS_NOTE)).toBe(true);
     const row = await storedRun(runId);
     expect(row).toMatchObject({
       status: "succeeded",
@@ -115,6 +125,8 @@ describe("chat model run", () => {
     expect(driven.externalCalls).toBe(0);
     expect(model.inputs).toHaveLength(1);
     expect(model.inputs[0]?.tools).toEqual([]);
+    expect(model.inputs[0]?.reasoningEffort).toBe("none");
+    expect(systemText(model.inputs[0]).endsWith(NO_TOOLS_NOTE)).toBe(true);
     expect(model.inputs[0]?.messages.some((message) => message.role === "tool")).toBe(false);
     const row = await storedRun(runId);
     expect(row).toMatchObject({
@@ -137,6 +149,8 @@ describe("chat model run", () => {
     expect(driven.externalCalls).toBe(0);
     expect(model.inputs.map((input) => input.model)).toEqual(["agent"]);
     expect(model.inputs[0]?.tools.map((tool) => tool.name)).toEqual(ALLOWLIST);
+    expect(model.inputs[0]).not.toHaveProperty("reasoningEffort");
+    expect(systemText(model.inputs[0]).includes(NO_TOOLS_NOTE)).toBe(false);
     const row = await storedRun(runId);
     expect(row).toMatchObject({
       status: "succeeded",
@@ -158,6 +172,9 @@ describe("chat model run", () => {
       expect(watched.reads()).toBe(0);
       expect(driven.externalCalls).toBe(0);
       expect(model.inputs.map((input) => input.model)).toEqual(["agent"]);
+      expect(model.inputs[0]?.tools.map((tool) => tool.name)).toEqual(ALLOWLIST);
+      expect(model.inputs[0]).not.toHaveProperty("reasoningEffort");
+      expect(systemText(model.inputs[0]).includes(NO_TOOLS_NOTE)).toBe(false);
       const row = await storedRun(runId);
       expect(row).toMatchObject({
         status: "succeeded",
@@ -201,6 +218,78 @@ describe("chat model run", () => {
       }).complete(ping("agent")),
     );
     expect(defaultTimeouts).toEqual([60_000]);
+  });
+
+  it("должен после /cloud отправить один JSON без ключа tools, с reasoning_effort none и фразой", async () => {
+    await saveChatModelChoice(sql, CHAT, "coder-cloud");
+    const runId = await enqueue("telegram", "какой шлюз рисует");
+    const agent = await loadRunnerAgent(sql, CLERK_ID);
+    const seen = await withGateway(textCompletionBody("сразу"), async (model) => {
+      const driven = await drain(sql, model);
+      expect(driven.externalCalls).toBe(0);
+    });
+
+    expect(seen).toHaveLength(1);
+    const body = asRecord(seen[0]);
+    expect(Object.hasOwn(body, "tools")).toBe(false);
+    expect(body.model).toBe("coder-cloud");
+    expect(body.reasoning_effort).toBe("none");
+    const system = wireSystem(body);
+    expect(system.startsWith(`${agent.systemPrompt}\n`)).toBe(true);
+    expect(system.endsWith(NO_TOOLS_NOTE)).toBe(true);
+    const row = await storedRun(runId);
+    expect(row).toMatchObject({
+      status: "succeeded",
+      model_alias: "coder-cloud",
+      provider: "local",
+      final_text: "сразу",
+    });
+  });
+
+  it("должен после /cloud на tool_calls завершить запуск failed одним вызовом клиента", async () => {
+    await saveChatModelChoice(sql, CHAT, "coder-cloud");
+    const runId = await enqueue("telegram", "открой файл");
+    const seen = await withGateway(toolCallCompletionBody(), async (model) => {
+      const driven = await drain(sql, model);
+      expect(driven.externalCalls).toBe(0);
+    });
+
+    expect(seen).toHaveLength(1);
+    const body = asRecord(seen[0]);
+    expect(Object.hasOwn(body, "tools")).toBe(false);
+    expect(body.reasoning_effort).toBe("none");
+    expect(wireSystem(body).endsWith(NO_TOOLS_NOTE)).toBe(true);
+    const row = await storedRun(runId);
+    expect(row).toMatchObject({
+      status: "failed",
+      error: "external_tool_call",
+      final_text: null,
+      model_alias: "coder-cloud",
+      provider: "local",
+    });
+  });
+
+  it("должен после /local отправить read_file и list_dir без ключа reasoning_effort", async () => {
+    await saveChatModelChoice(sql, CHAT, "agent");
+    const runId = await enqueue("telegram", "локальный вопрос");
+    const seen = await withGateway(textCompletionBody("локально"), async (model) => {
+      const driven = await drain(sql, model);
+      expect(driven.externalCalls).toBe(0);
+    });
+
+    expect(seen).toHaveLength(1);
+    const body = asRecord(seen[0]);
+    expect(body.model).toBe("agent");
+    expect(Object.hasOwn(body, "reasoning_effort")).toBe(false);
+    expect(wireToolNames(body)).toEqual(ALLOWLIST);
+    expect(wireSystem(body).includes(NO_TOOLS_NOTE)).toBe(false);
+    const row = await storedRun(runId);
+    expect(row).toMatchObject({
+      status: "succeeded",
+      model_alias: "agent",
+      provider: "local",
+      final_text: "локально",
+    });
   });
 
   it("должен не содержать переменную, которая уводит весь Telegram во внешний алиас", async () => {
@@ -249,7 +338,7 @@ function scripted(output: ModelOutput): ScriptedModel {
   return {
     inputs,
     complete(input: ModelInput): Promise<ModelOutput> {
-      inputs.push({
+      const saved: ModelInput = {
         model: input.model,
         temperature: input.temperature,
         maxTokens: input.maxTokens,
@@ -260,7 +349,11 @@ function scripted(output: ModelOutput): ScriptedModel {
           toolCalls: message.toolCalls,
         })),
         tools: input.tools.map((tool) => ({ ...tool })),
-      });
+      };
+      if (input.reasoningEffort === "none") {
+        saved.reasoningEffort = "none";
+      }
+      inputs.push(saved);
       return Promise.resolve(output);
     },
   };
@@ -406,4 +499,190 @@ async function readSource(filePath: string): Promise<string> {
   // Фиксированные файлы репозитория, не путь из запуска.
   // eslint-disable-next-line security/detect-non-literal-fs-filename -- чтение исходников пакета
   return readFile(filePath, "utf8");
+}
+
+function systemText(input: ModelInput | undefined): string {
+  const content = input?.messages.find((message) => message.role === "system")?.content;
+  if (content === null || content === undefined) {
+    throw new Error("system message");
+  }
+  return content;
+}
+
+function textCompletionBody(content: string): unknown {
+  return {
+    model: "reported",
+    choices: [{ message: { role: "assistant", content } }],
+    usage: { prompt_tokens: 2, completion_tokens: 3 },
+  };
+}
+
+function toolCallCompletionBody(): unknown {
+  return {
+    model: "reported",
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call-1",
+              type: "function",
+              function: { name: "read_file", arguments: "{\"path\":\"note.txt\"}" },
+            },
+          ],
+        },
+      },
+    ],
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error("request body");
+  }
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function wireSystem(body: Record<string, unknown>): string {
+  const messages = body.messages;
+  if (!Array.isArray(messages)) {
+    throw new Error("messages");
+  }
+  for (const message of messages) {
+    if (!isRecord(message)) {
+      continue;
+    }
+    if (message.role === "system" && typeof message.content === "string") {
+      return message.content;
+    }
+  }
+  throw new Error("system message");
+}
+
+function wireToolNames(body: Record<string, unknown>): string[] {
+  const tools = body.tools;
+  if (!Array.isArray(tools)) {
+    throw new Error("tools");
+  }
+  return tools.map((tool) => {
+    if (!isRecord(tool)) {
+      throw new Error("tool");
+    }
+    const spec = tool.function;
+    if (!isRecord(spec) || typeof spec.name !== "string") {
+      throw new Error("tool name");
+    }
+    return spec.name;
+  });
+}
+
+async function withGateway(
+  responseBody: unknown,
+  run: (model: ChatModel) => Promise<void>,
+): Promise<unknown[]> {
+  const bodies: unknown[] = [];
+  let serverError: Error | undefined;
+  const server = createServer((req, res) => {
+    void readGateway(req, res, bodies, responseBody);
+  });
+  server.requestTimeout = 5_000;
+  server.headersTimeout = 5_000;
+  server.on("error", (error: Error) => {
+    serverError = error;
+  });
+  await listen(server);
+  try {
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("test server address");
+    }
+    const model = new LiteLLMChatModel({
+      baseUrl: `http://127.0.0.1:${address.port}/v1`,
+      apiKey: "test-secret-value",
+    });
+    await run(model);
+    if (serverError !== undefined) {
+      throw serverError;
+    }
+    return bodies;
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function readGateway(
+  req: IncomingMessage,
+  res: ServerResponse,
+  bodies: unknown[],
+  responseBody: unknown,
+): Promise<void> {
+  try {
+    const raw = await readIncoming(req);
+    bodies.push(raw.length > 0 ? (JSON.parse(raw) as unknown) : raw);
+    res.statusCode = 200;
+    res.setHeader("content-type", "application/json; charset=utf-8");
+    res.end(JSON.stringify(responseBody));
+  } catch {
+    if (!res.headersSent) {
+      res.statusCode = 500;
+    }
+    res.end();
+  }
+}
+
+async function readIncoming(req: IncomingMessage): Promise<string> {
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of req) {
+    chunks.push(copyChunk(chunk));
+  }
+  const merged = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8", { fatal: false }).decode(merged);
+}
+
+/** Поток запроса в типах Node отдаёт any. Наружу выходит только байтовый срез. */
+function copyChunk(chunk: unknown): Uint8Array {
+  if (typeof chunk === "string") {
+    return Buffer.from(chunk);
+  }
+  if (chunk instanceof Uint8Array) {
+    return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  }
+  throw new Error("unexpected request chunk");
+}
+
+async function listen(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => {
+      reject(error);
+    };
+    server.once("error", onError);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
 }

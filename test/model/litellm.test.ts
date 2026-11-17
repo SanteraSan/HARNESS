@@ -132,6 +132,44 @@ describe("LiteLLMChatModel", () => {
       const body = requests[0]?.body;
       expect(body).toMatchObject({ model: "agent" });
       expect(body).not.toHaveProperty("tools");
+      expect(body).not.toHaveProperty("reasoning_effort");
+    });
+  });
+
+  it("должен записать reasoning_effort none и не писать ключ tools", async () => {
+    await withServer({ status: 200, body: textCompletion("сразу") }, async ({ baseUrl, requests }) => {
+      const model = new LiteLLMChatModel({ baseUrl, apiKey });
+      await model.complete(
+        userInput({
+          model: "coder-cloud",
+          reasoningEffort: "none",
+          tools: [],
+          messages: [
+            {
+              role: "system",
+              content:
+                "Отвечай по результатам инструментов.\nВ этом ходе инструментов нет. Ответь на вопрос сразу, не открывая файлы.",
+              toolCallId: null,
+              toolCalls: null,
+            },
+            { role: "user", content: "вопрос", toolCallId: null, toolCalls: null },
+          ],
+        }),
+      );
+      const body = requests[0]?.body;
+      expect(body).not.toHaveProperty("tools");
+      expect(body).toMatchObject({
+        model: "coder-cloud",
+        reasoning_effort: "none",
+        messages: [
+          {
+            role: "system",
+            content:
+              "Отвечай по результатам инструментов.\nВ этом ходе инструментов нет. Ответь на вопрос сразу, не открывая файлы.",
+          },
+          { role: "user", content: "вопрос" },
+        ],
+      });
     });
   });
 
