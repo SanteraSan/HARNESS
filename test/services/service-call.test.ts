@@ -412,6 +412,51 @@ describe("service call", () => {
     expect(rows[0]?.report).toBeNull();
   });
 
+  it("должен оставить явный JSON null в claimed_prompt_tokens и не дописывать опущенные ключи", async () => {
+    const runId = await insertRun();
+    handler = async (req, res) => {
+      json(res, 200, reply(await readRequest(req), {
+        text: "готово",
+        report: { has_model: true, claimed_prompt_tokens: null },
+      }));
+    };
+    const outcome = await call(runId, readTool, { path: "a.txt" });
+    expect(outcome.text).toBe("готово");
+    const rows = await sql<{
+      report_status: string;
+      claimed_prompt_tokens: number | null;
+      report: unknown;
+    }[]>`
+      select result.report_status, result.claimed_prompt_tokens, result.report
+      from service_results as result
+      join service_invocations as invocation on invocation.id = result.invocation_id
+      where invocation.run_id = ${runId}
+    `;
+    expect(rows[0]?.report_status).toBe("valid");
+    expect(rows[0]?.claimed_prompt_tokens).toBeNull();
+    expect(rows[0]?.report).toEqual({ has_model: true, claimed_prompt_tokens: null });
+  });
+
+  it("должен отвергнуть отчёт целиком, если в строке запрещённый символ", async () => {
+    const runId = await insertRun();
+    handler = async (req, res) => {
+      json(res, 200, reply(await readRequest(req), {
+        text: "готово",
+        report: { has_model: true, finish_reason: "stop\u0001" },
+      }));
+    };
+    const outcome = await call(runId, readTool, { path: "a.txt" });
+    expect(outcome.text).toBe("готово");
+    const rows = await sql<{ report_status: string; report: unknown }[]>`
+      select result.report_status, result.report
+      from service_results as result
+      join service_invocations as invocation on invocation.id = result.invocation_id
+      where invocation.run_id = ${runId}
+    `;
+    expect(rows[0]?.report_status).toBe("invalid");
+    expect(rows[0]?.report).toBeNull();
+  });
+
   it("должен не импортировать клиент сервиса из src/queue", async () => {
     const directory = path.resolve(import.meta.dirname, "../../src/queue");
     const names = await readdir(directory);
