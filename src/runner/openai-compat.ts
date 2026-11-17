@@ -1,5 +1,7 @@
 import {
+  filterToolNames,
   interpretModelOutput,
+  isDeniedToolName,
   type ClaimedRun,
   type FinishOutcome,
   type ModelInput,
@@ -430,6 +432,25 @@ export class OpenAICompatRunner implements Runner {
         cost,
       );
 
+      // Имя из манифеста, прошедшее allowlist и не запрещённое, исполняет клиент сервиса.
+      // Локальный реестр для такого имени не нужен. Запрет сильнее манифеста: HTTP нет.
+      // Ход coder-cloud сюда не доходит: внешний ход отсекается до applyToolCalls.
+      if (this.servicePermitted(call.name, allowlist)) {
+        const visible = await this.executeServiceTool(
+          ctx,
+          claimed,
+          call,
+          toolContext,
+          cost,
+          seenEffects,
+        );
+        if (visible === null) {
+          return false;
+        }
+        messages.push(toolMessage(call.id, visible));
+        continue;
+      }
+
       // I3: запрет сильнее allowlist. Имя вне списка тоже не доходит до execute.
       const decision = decideToolCall(call.name, allowlist, ctx.tools);
       if (!decision.ok) {
@@ -464,6 +485,72 @@ export class OpenAICompatRunner implements Runner {
       messages.push(toolMessage(call.id, visible));
     }
     return true;
+  }
+
+  private servicePermitted(name: string, allowlist: readonly string[]): boolean {
+    const services = this.services;
+    if (services === undefined || !services.has(name) || isDeniedToolName(name)) {
+      return false;
+    }
+    return filterToolNames(allowlist).includes(name);
+  }
+
+  private serviceEffect(name: string, tools: readonly Tool[]): ToolEffect | undefined {
+    const listed = this.services?.effect?.(name);
+    if (listed !== undefined) {
+      return listed;
+    }
+    for (const tool of tools) {
+      if (tool.name === name) {
+        return tool.effect;
+      }
+    }
+    return undefined;
+  }
+
+  private async executeServiceTool(
+    ctx: RunnerContext,
+    claimed: ClaimedRun,
+    call: ToolCall,
+    toolContext: ToolContext,
+    cost: number | null,
+    seenEffects: ToolEffect[],
+  ): Promise<string | null> {
+    const services = this.services;
+    const parsed = parseArguments(call.arguments);
+    if (services === undefined || !parsed.ok) {
+      const visible = this.toolData("invalid arguments");
+      await this.appendToolResult(ctx, claimed.id, call, visible, visible, cost, null);
+      return visible;
+    }
+
+    // Эффект из манифеста, после allowlist. Отказ политики сюда не доходит.
+    const effect = this.serviceEffect(call.name, ctx.tools);
+    if (effect !== undefined) {
+      seenEffects.push(effect);
+    }
+    const outcome = await services.execute({
+      runId: claimed.id,
+      tenantId: claimed.tenantId,
+      agentId: toolContext.agentId,
+      workerId: ctx.workerId,
+      toolCallId: call.id,
+      name: call.name,
+      args: parsed.value,
+    });
+    if (outcome.lockLost) {
+      return null;
+    }
+    await this.appendToolResult(
+      ctx,
+      claimed.id,
+      call,
+      outcome.text,
+      outcome.error,
+      cost,
+      outcome.requestExcerpt,
+    );
+    return outcome.text;
   }
 
   private async executeAllowed(

@@ -133,22 +133,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
 export interface ServiceManifestLoad {
   manifest: ServicesManifest;
-  secretsByEnv: ReadonlyMap<string, string>;
-  redactSecrets: readonly string[];
 }
+
+/** Как у сейфа: пустой и короткий ключ не открывают bearer. Длиннее тоже не кладём в процесс. */
+const CONNECTOR_KEY_MIN = 16;
+const CONNECTOR_KEY_MAX = 256;
 
 /**
  * Пустой путь не включает HTTP. Битый файл или сумма останавливают процесс до захвата.
- * src/services само окружение не читает: секрет по имени забирается здесь.
+ * auth.env — имя секрета в сейфе, не ключ process.env и не значение.
+ * При bearer пустой, короткий или слишком длинный CONNECTOR_SECRETS_KEY — ConfigError
+ * с именем поля, без значения.
  */
 export async function readServiceManifest(config: Config): Promise<ServiceManifestLoad | null> {
-  return readServiceManifestFrom(config, process.env);
-}
-
-async function readServiceManifestFrom(
-  config: Config,
-  env: NodeJS.ProcessEnv,
-): Promise<ServiceManifestLoad | null> {
   if (config.servicesManifestPath === null && config.servicesManifestSha256 === null) {
     return null;
   }
@@ -178,21 +175,24 @@ async function readServiceManifestFrom(
   if (!parsed.ok) {
     throw new ConfigError(["SERVICES_MANIFEST"]);
   }
-  const secretsByEnv = new Map<string, string>();
-  const redactSecrets: string[] = [];
-  for (const service of parsed.value.services) {
-    if (service.auth.type !== "bearer") {
-      continue;
-    }
-    const value = env[service.auth.env];
-    if (typeof value !== "string" || value.length === 0) {
-      throw new ConfigError([service.auth.env]);
-    }
-    secretsByEnv.set(service.auth.env, value);
-    redactSecrets.push(value);
+  if (manifestNeedsBearer(parsed.value) && !connectorKeyAcceptable(config.connectorSecretsKey)) {
+    throw new ConfigError(["CONNECTOR_SECRETS_KEY"]);
   }
   logger.info({ services: parsed.value.services.length }, "service manifest loaded");
-  return { manifest: parsed.value, secretsByEnv, redactSecrets };
+  return { manifest: parsed.value };
+}
+
+function manifestNeedsBearer(manifest: ServicesManifest): boolean {
+  for (const service of manifest.services) {
+    if (service.auth.type === "bearer") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function connectorKeyAcceptable(key: string): boolean {
+  return key.length >= CONNECTOR_KEY_MIN && key.length <= CONNECTOR_KEY_MAX;
 }
 
 export function errorCode(error: unknown): string {

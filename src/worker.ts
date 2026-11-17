@@ -22,6 +22,7 @@ import { createModelSlots, createRunQueue, type ModelSlots } from "./queue/index
 import { OpenAICompatRunner, type RunnerAgent } from "./runner/index.js";
 import { runModelTurn, type ModelTurnOptions } from "./runner/model-turn.js";
 import { type ChatModelAlias } from "./runner/openai-compat.js";
+import { createSecretVault, type SecretVault } from "./secrets/index.js";
 import { createServiceCatalog, maintainServiceRows } from "./services/index.js";
 import { assertFileRoot } from "./tools/file-root.js";
 import { toolRegistry } from "./tools/index.js";
@@ -622,24 +623,22 @@ function workerLoopOptions(
   services: ServiceManifestLoad | null,
   slots: ModelSlots,
 ): WorkerLoopOptions {
-  const secrets = [
-    ...collectSecrets({
-      databaseUrl: config.databaseUrl,
-      harnessTestDatabaseUrl: config.harnessTestDatabaseUrl,
-      litellmApiKey: config.litellmApiKey,
-      harnessApiToken: config.harnessApiToken,
-      telegramBotToken: config.telegramBotToken,
-      connectorSecretsKey: config.connectorSecretsKey,
-    }),
-    ...(services?.redactSecrets ?? []),
-  ];
+  const secrets = collectSecrets({
+    databaseUrl: config.databaseUrl,
+    harnessTestDatabaseUrl: config.harnessTestDatabaseUrl,
+    litellmApiKey: config.litellmApiKey,
+    harnessApiToken: config.harnessApiToken,
+    telegramBotToken: config.telegramBotToken,
+    connectorSecretsKey: config.connectorSecretsKey,
+  });
+  // Bearer не читается из окружения: сейф отдаёт его в момент вызова по agent_id.
   const catalog =
     services === null
       ? undefined
       : createServiceCatalog({
           sql,
           manifest: services.manifest,
-          secretsByEnv: services.secretsByEnv,
+          vault: vaultForManifest(sql, services.manifest, config.connectorSecretsKey),
           redactSecrets: secrets,
         });
   // Одна очередь процесса: дочерняя строка ждёт следующий захват этого воркера.
@@ -685,6 +684,19 @@ function workerLoopOptions(
     },
     slots,
   };
+}
+
+function vaultForManifest(
+  sql: Sql,
+  manifest: ServiceManifestLoad["manifest"],
+  encryptionKey: string,
+): SecretVault | null {
+  for (const service of manifest.services) {
+    if (service.auth.type === "bearer") {
+      return createSecretVault(sql, encryptionKey);
+    }
+  }
+  return null;
 }
 
 async function ensureFileRoot(fileRoot: string): Promise<void> {
