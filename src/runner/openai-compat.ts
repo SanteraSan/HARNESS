@@ -2,6 +2,7 @@ import {
   interpretModelOutput,
   type ClaimedRun,
   type FinishOutcome,
+  type ModelInput,
   type ModelMessage,
   type ModelOutput,
   type ModelToolSpec,
@@ -172,14 +173,9 @@ export class OpenAICompatRunner implements Runner {
             cost,
           );
           logger.info({ run_id: claimed.id, model: resolved.modelAlias, attempt }, "model request");
-          const external = externalTurn(resolved);
-          return ctx.model.complete({
-            model: resolved.modelAlias,
-            temperature: 0,
-            messages: external ? messagesForExternal(messages) : messages,
-            tools: external ? [] : tools,
-            maxTokens: agent.maxCompletionTokens,
-          });
+          return ctx.model.complete(
+            modelInputFor(resolved, messages, tools, agent.maxCompletionTokens),
+          );
         },
         afterHeld: async (output) => {
           totals.promptTokens = addTokens(totals.promptTokens, output.promptTokens);
@@ -633,6 +629,64 @@ export class OpenAICompatRunner implements Runner {
 /** Алиас шлюза или provider external: инструментов нет и результаты чтения не уходят. */
 function externalTurn(resolved: ResolvedAlias): boolean {
   return resolved.modelAlias === "coder-cloud" || resolved.provider === "external";
+}
+
+/**
+ * Ход coder-cloud отвечает без инструментов.
+ * Фраза добавляется к копии системного промпта, строка агента и локальный ход не меняются.
+ */
+const CODER_CLOUD_NO_TOOLS_NOTE =
+  "В этом ходе инструментов нет. Ответь на вопрос сразу, не открывая файлы.";
+
+function modelInputFor(
+  resolved: ResolvedAlias,
+  messages: readonly ModelMessage[],
+  tools: readonly ModelToolSpec[],
+  maxTokens: number,
+): ModelInput {
+  const external = externalTurn(resolved);
+  const input: ModelInput = {
+    model: resolved.modelAlias,
+    temperature: 0,
+    messages: messagesForTurn(messages, resolved),
+    tools: external ? [] : tools,
+    maxTokens,
+  };
+  // Алиас agent поле не получает. none не снимаем: отказ шлюза не приводит к повторному вызову без него.
+  if (resolved.modelAlias === "coder-cloud") {
+    input.reasoningEffort = "none";
+  }
+  return input;
+}
+
+function messagesForTurn(
+  messages: readonly ModelMessage[],
+  resolved: ResolvedAlias,
+): readonly ModelMessage[] {
+  const visible = externalTurn(resolved) ? messagesForExternal(messages) : messages;
+  if (resolved.modelAlias !== "coder-cloud") {
+    return visible;
+  }
+  return visible.map((message) =>
+    message.role === "system"
+      ? {
+          role: "system",
+          content: appendCoderCloudNote(message.content),
+          toolCallId: null,
+          toolCalls: null,
+        }
+      : message,
+  );
+}
+
+function appendCoderCloudNote(content: string | null): string {
+  if (content !== null && content.includes(CODER_CLOUD_NO_TOOLS_NOTE)) {
+    return content;
+  }
+  if (content === null || content.length === 0) {
+    return CODER_CLOUD_NO_TOOLS_NOTE;
+  }
+  return `${content}\n${CODER_CLOUD_NO_TOOLS_NOTE}`;
 }
 
 /**

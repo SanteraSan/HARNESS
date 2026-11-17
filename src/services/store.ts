@@ -184,7 +184,11 @@ export async function loadStoredText(sql: Sql, invocationId: string): Promise<St
 
 /**
  * pending без живого лока становится abandoned.
- * jsonb старше 30 суток обнуляется, не больше 20 строк. succeeded не ставится.
+ * jsonb старше 30 суток обнуляется вместе со статусом: report = null,
+ * report_status = absent, четыре claimed-поля пустые. Иначе valid без report
+ * и absent с заполненными claimed проверка таблицы не примет.
+ * Не больше 20 строк. excerpt, ok, truncated и шаги не чистятся.
+ * succeeded не ставится.
  */
 export async function maintainServiceRows(sql: Sql): Promise<void> {
   await sql`
@@ -206,7 +210,12 @@ export async function maintainServiceRows(sql: Sql): Promise<void> {
   `;
   await sql`
     update service_results
-    set report = null
+    set report = null,
+        report_status = 'absent',
+        claimed_prompt_tokens = null,
+        claimed_completion_tokens = null,
+        claimed_cost_usd = null,
+        claimed_finish_reason = null
     where invocation_id in (
       select result.invocation_id
       from service_results as result
