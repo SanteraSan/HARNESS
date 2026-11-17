@@ -73,6 +73,38 @@ describe("list_dir", () => {
     expect(outcome).toEqual({ ok: false, error: "path escapes root" });
   });
 
+  it("должен вернуть пустой каталог без обрезки", async () => {
+    const root = mustJail(jail);
+
+    const outcome = await listDirTool.execute({}, root.ctx);
+
+    expect(outcome).toEqual({ ok: true, text: "", truncated: false, entries: [] });
+  });
+
+  it("должен остановить список перед именем, которое превысит 8000 кодпоинтов", async () => {
+    const root = mustJail(jail);
+    const names: string[] = [];
+    for (let index = 0; index < 40; index += 1) {
+      const name = `${String(index).padStart(2, "0")}${"x".repeat(198)}`;
+      names.push(name);
+      await writeFile(path.join(root.root, name), "x", "utf8");
+    }
+
+    const outcome = await listDirTool.execute({}, root.ctx);
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) {
+      return;
+    }
+    const lines = outcome.text.split("\n");
+    expect(outcome.truncated).toBe(true);
+    expect(lines).toHaveLength(39);
+    expect([...outcome.text].length).toBeLessThanOrEqual(8000);
+    expect(lines[0]).toBe(names[0]);
+    expect(outcome.text.includes(names[39] ?? "")).toBe(false);
+    expect(outcome.entries).toHaveLength(39);
+  });
+
   it("должен отказать, если path указывает на файл", async () => {
     const root = mustJail(jail);
     await writeFile(path.join(root.root, "note.txt"), "text", "utf8");

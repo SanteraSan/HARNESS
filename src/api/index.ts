@@ -17,7 +17,11 @@ async function main(): Promise<void> {
   }
 
   const sql = createSql(config.databaseUrl);
-  const app = createApi({ sql, token: config.harnessApiToken });
+  const app = createApi({
+    sql,
+    token: config.harnessApiToken,
+    adminToken: config.harnessAdminToken,
+  });
   const server = startHttpServer(app, API_LISTEN_PORT);
   server.on("error", (error) => {
     logger.error({ err: error }, "http server error");

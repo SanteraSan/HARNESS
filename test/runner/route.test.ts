@@ -44,7 +44,7 @@ describe("route run", () => {
     }
   });
 
-  it("должен выбрать coder-cloud / external после вызова инструмента effect write", async () => {
+  it("должен не менять алиас, если имя write нет в allowlist", async () => {
     await applyRouteRules();
     let executed = false;
     const writeTool: Tool = {
@@ -65,7 +65,67 @@ describe("route run", () => {
     const runId = await execute("запиши заметку", model, [writeTool]);
 
     expect(executed).toBe(false);
-    expect(model.inputs.map((input) => input.model)).toEqual(["agent", "coder-cloud"]);
+    expect(model.inputs.map((input) => input.model)).toEqual(["agent", "agent"]);
+    const run = await storedRun(runId);
+    expect(run).toMatchObject({
+      status: "succeeded",
+      model_alias: "agent",
+      provider: "local",
+      final_text: "записал",
+    });
+    const steps = await storedSteps(runId);
+    expect(steps.some((step) => step.kind === "policy_deny")).toBe(true);
+    for (const input of model.inputs) {
+      expect(input.model).not.toBe("coder-cloud");
+    }
+  });
+
+  it("должен увести разрешённый write на coder-cloud без результатов инструментов", async () => {
+    await applyRouteRules();
+    await sql`
+      update agents
+      set tool_allowlist = array['read_file', 'list_dir', 'record_note']::text[]
+      where id = ${CLERK_ID}
+    `;
+    let executed = false;
+    const readTool: Tool = {
+      name: "read_file",
+      description: "Чтение",
+      effect: "read",
+      parameters: z.object({}),
+      execute() {
+        return Promise.resolve({
+          ok: true,
+          text: "FILE-SECRET-BODY",
+          truncated: false,
+          entries: null,
+        });
+      },
+    };
+    const writeTool: Tool = {
+      name: "record_note",
+      description: "Учебная запись",
+      effect: "write",
+      parameters: z.object({}),
+      execute() {
+        executed = true;
+        return Promise.resolve({ ok: true, text: "записано", truncated: false, entries: null });
+      },
+    };
+    const model = scripted([
+      toolOutput([{ id: "call-r", name: "read_file", arguments: "{}" }]),
+      toolOutput([{ id: "call-w", name: "record_note", arguments: "{}" }]),
+      textOutput("записал", 0.5),
+    ]);
+
+    const runId = await execute("запиши заметку", model, [readTool, writeTool]);
+
+    expect(executed).toBe(true);
+    expect(model.inputs.map((input) => input.model)).toEqual(["agent", "agent", "coder-cloud"]);
+    const external = model.inputs[2];
+    expect(external?.tools).toEqual([]);
+    expect(external?.messages.some((message) => message.role === "tool")).toBe(false);
+    expect(JSON.stringify(external?.messages)).not.toContain("FILE-SECRET-BODY");
     const run = await storedRun(runId);
     expect(run).toMatchObject({
       status: "succeeded",
@@ -75,12 +135,7 @@ describe("route run", () => {
     });
     const steps = await storedSteps(runId);
     const requests = steps.filter((step) => step.kind === "model_request");
-    expect(requests[0]?.request_excerpt).toBe("agent\nзапиши заметку");
-    expect(requests[1]?.request_excerpt).toBe("coder-cloud\nзапиши заметку");
-    expectCost(requests[0]?.cost_usd ?? null, 0);
-    expectCost(requests[1]?.cost_usd ?? null, 0.5);
-    const finalStep = steps.find((step) => step.kind === "final");
-    expectCost(finalStep?.cost_usd ?? null, 0.5);
+    expectCost(requests[2]?.cost_usd ?? null, 0.5);
   });
 
   it("должен оставить первый parse_error локальным, а следующий запуск того же хода увести на внешний алиас", async () => {
@@ -107,6 +162,7 @@ describe("route run", () => {
     const secondId = await execute("повтори ход", second, []);
 
     expect(second.inputs.map((input) => input.model)).toEqual(["coder-cloud"]);
+    expect(second.inputs[0]?.tools).toEqual([]);
     const escalated = await storedRun(secondId);
     expect(escalated).toMatchObject({
       status: "succeeded",

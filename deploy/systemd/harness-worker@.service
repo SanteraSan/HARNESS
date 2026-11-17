@@ -1,0 +1,21 @@
+# Шаблон экземпляра. Установка копирует его и подставляет свой каталог.
+# Число процессов — число включённых harness-worker@<id>.
+# У двух процессов разный WORKER_ID=%i. Код процессы не порождает.
+# ReadWritePaths не включает FILE_ROOT и BLOB_ROOT.
+
+[Unit]
+Description=HARNESS worker %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/harness
+Environment=WORKER_ID=%i
+ExecStart=/usr/bin/npm run worker
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

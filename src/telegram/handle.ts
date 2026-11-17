@@ -3,12 +3,14 @@ import type { EnqueueInput } from "../contracts/types.js";
 import type { DialogMessage } from "./buffer.js";
 import {
   BUFFER_BEHIND_TEXT,
+  BUFFER_FULL_TEXT,
   decideUpdate,
   replyForBuffered,
   replyForEnqueue,
   type ChatModelAlias,
   type TelegramUpdateView,
 } from "./decide.js";
+import { TelegramError } from "./errors.js";
 
 /** M1 знает один арендатор. Постановка Telegram всегда source = telegram. */
 const LOCAL_TENANT = "local";
@@ -79,7 +81,10 @@ export async function handleTelegramUpdate(
       };
     }
     if (await pending(options.agentId, decision.chatId)) {
-      await remembered(busyMessage(decision, options.agentId));
+      const saved = await rememberUnlessFull(remembered, busyMessage(decision, options.agentId));
+      if (!saved) {
+        return bufferFull(update.chatId);
+      }
       return {
         text: BUFFER_BEHIND_TEXT,
         followRunId: null,
@@ -98,7 +103,10 @@ export async function handleTelegramUpdate(
     chatId: decision.chatId,
   });
   if (queued.reason === "dialog_busy" && remembered !== undefined) {
-    await remembered(busyMessage(decision, options.agentId));
+    const saved = await rememberUnlessFull(remembered, busyMessage(decision, options.agentId));
+    if (!saved) {
+      return bufferFull(update.chatId);
+    }
     logger.info({ run_id: queued.runId }, "telegram message buffered");
     return {
       text: replyForBuffered(queued.runId),
@@ -113,6 +121,26 @@ export async function handleTelegramUpdate(
     chatId: update.chatId,
     wakeBuffer: false,
   };
+}
+
+function bufferFull(chatId: string | null): HandleResult {
+  return { text: BUFFER_FULL_TEXT, followRunId: null, chatId, wakeBuffer: false };
+}
+
+/** false — потолок буфера, строка не записана. Прочие ошибки пробрасываются. */
+async function rememberUnlessFull(
+  remembered: (message: DialogMessage) => Promise<void>,
+  message: DialogMessage,
+): Promise<boolean> {
+  try {
+    await remembered(message);
+    return true;
+  } catch (error) {
+    if (error instanceof TelegramError && error.code === "buffer_full") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function busyMessage(

@@ -20,14 +20,57 @@ describe("loadConfig", () => {
   it("должен подставить значения M1 и сохранить длинный id строкой", () => {
     const config = loadConfig(baseEnv());
     expect(config.litellmBaseUrl).toBe("http://127.0.0.1:4000/v1");
+    expect(config.litellmAllowedHosts).toEqual([]);
+    expect(config.connectorSecretsKey).toBe("");
     expect(config.agentSlug).toBe("clerk");
     expect(config.fileRoot).toBe("./workspace");
     expect(config.leaseSeconds).toBe(120);
     expect(config.heartbeatSeconds).toBe(15);
+    expect(config.modelSlots).toBe(1);
     expect(config.workerId).toBe(hostname());
     expect(config.harnessLiveModel).toBeNull();
     expect(config.telegramAllowedUserIds).toEqual(["1234567890123456789", "42"]);
     expect(config.telegramBotToken).toBe("");
+  });
+
+  it("должен принять MODEL_SLOTS и отказать нулю и имени модели", () => {
+    expect(loadConfig(baseEnv({ MODEL_SLOTS: "2" })).modelSlots).toBe(2);
+    expect(() => loadConfig(baseEnv({ MODEL_SLOTS: "0" }))).toThrow(ConfigError);
+    expect(() => loadConfig(baseEnv({ MODEL_SLOTS: "qwen" }))).toThrow(ConfigError);
+    try {
+      loadConfig(baseEnv({ MODEL_SLOTS: "0" }));
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConfigError);
+      if (error instanceof ConfigError) {
+        expect(error.message).not.toContain("postgres://");
+        expect(error.message).toContain("MODEL_SLOTS");
+      }
+    }
+  });
+
+  it("должен отказать, если хост шлюза не 127.0.0.1 и не назван в списке", () => {
+    expect(() =>
+      loadConfig(baseEnv({ LITELLM_BASE_URL: "https://models.example/v1" })),
+    ).toThrow(ConfigError);
+    expect(() => loadConfig(baseEnv({ LITELLM_BASE_URL: "http://localhost:4000/v1" }))).toThrow(
+      ConfigError,
+    );
+    const allowed = loadConfig(
+      baseEnv({
+        LITELLM_BASE_URL: "https://models.example/v1",
+        LITELLM_ALLOWED_HOSTS: "models.example",
+      }),
+    );
+    expect(allowed.litellmBaseUrl).toBe("https://models.example/v1");
+    expect(allowed.litellmAllowedHosts).toEqual(["models.example"]);
+    expect(() =>
+      loadConfig(
+        baseEnv({
+          LITELLM_BASE_URL: "http://models.example/v1",
+          LITELLM_ALLOWED_HOSTS: "models.example",
+        }),
+      ),
+    ).toThrow(ConfigError);
   });
 
   it("должен отказать без DATABASE_URL и не включить секрет в текст ошибки", () => {

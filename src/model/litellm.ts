@@ -91,7 +91,9 @@ interface WireRequest {
   temperature: 0;
   max_tokens: number;
   messages: WireMessage[];
-  tools: WireTool[];
+  tools?: WireTool[];
+  /** Пишется только если ход сам задал none. Отказ шлюза ключ не снимает. */
+  reasoning_effort?: "none";
 }
 
 interface CappedText {
@@ -160,6 +162,7 @@ export class LiteLLMChatModel implements ChatModel {
           accept: "application/json",
         },
         this.timeoutMs,
+        input.signal,
       );
     } catch (error) {
       throw transportError(error, this.secrets);
@@ -221,13 +224,21 @@ function resolveCompletionsUrl(baseUrl: string): URL {
 }
 
 function buildPayload(input: ModelInput): WireRequest {
-  return {
+  const payload: WireRequest = {
     model: input.model,
     temperature: 0,
     max_tokens: requireCompletionTokens(input.maxTokens),
     messages: input.messages.map(toWireMessage),
-    tools: input.tools.map(toWireTool),
   };
+  // Пустой массив тоже предлагает модели вызвать инструмент. Ключ тогда не пишем.
+  if (input.tools.length > 0) {
+    payload.tools = input.tools.map(toWireTool);
+  }
+  // Алиас agent поле не задаёт — ключа нет. none не выбрасываем и не подменяем бюджетом.
+  if (input.reasoningEffort === "none") {
+    payload.reasoning_effort = "none";
+  }
+  return payload;
 }
 
 /** Вне диапазона миграции запрос не уходит: иначе шлюз снова пишет без предела. */
@@ -350,8 +361,11 @@ function postJson(
   body: string,
   headers: Record<string, string>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<Response> {
-  const signal = AbortSignal.timeout(timeoutMs);
+  const timeout = AbortSignal.timeout(timeoutMs);
+  // Потеря лока отменяет запрос, не дожидаясь таймаута модели.
+  const requestSignal = signal === undefined ? timeout : AbortSignal.any([timeout, signal]);
   const request = url.protocol === "https:" ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -360,7 +374,8 @@ function postJson(
         return;
       }
       settled = true;
-      reject(error);
+      // Причина отказа промиса — Error: сокет отдаёт Error, прочее не тащим в reject.
+      reject(error instanceof Error ? error : new Error("model transport failed"));
     };
     const succeed = (response: Response): void => {
       if (settled) {
@@ -378,7 +393,7 @@ function postJson(
           ...headers,
           "content-length": String(Buffer.byteLength(body)),
         },
-        signal,
+        signal: requestSignal,
       },
       (incoming) => {
         // Редирект не читаем и не повторяем: цель могла бы получить bearer.
