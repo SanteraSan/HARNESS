@@ -4,6 +4,13 @@ import { logger } from "../config.js";
 import type { RunQueue } from "../contracts/types.js";
 import type { Sql } from "../db/client.js";
 import { createRunQueue } from "../queue/index.js";
+import {
+  listAdminAgents,
+  listAdminCrons,
+  listAdminRuns,
+  listAdminSteps,
+  readWebAsset,
+} from "./admin.js";
 import { bearerMatches } from "./auth.js";
 import { readCreateRunInput } from "./body.js";
 import { ApiError, clientFailure } from "./errors.js";
@@ -20,20 +27,25 @@ type ApiEnv = {
 export interface CreateApiOptions {
   sql: Sql;
   token: string;
+  /** Пустая строка не открывает JSON. Старые вызовы могут поле не передавать. */
+  adminToken?: string;
   queue?: RunQueue;
 }
 
 /** HTTP M1. Модель отсюда не вызывается: постановка идёт в уже собранную очередь. */
 export function createApi(options: CreateApiOptions): Hono<ApiEnv> {
   const queue = options.queue ?? createRunQueue(options.sql);
+  const adminToken = options.adminToken ?? "";
   const app = new Hono<ApiEnv>();
 
   app.use("*", async (c, next) => {
     c.set("runId", undefined);
     c.header("X-Content-Type-Options", "nosniff");
-    if (!isPublicHealth(c.req.method, c.req.path)) {
+    if (!isPublicRoute(c.req.method, c.req.path)) {
       const header = c.req.raw.headers.get("authorization") ?? undefined;
-      if (!bearerMatches(options.token, header)) {
+      // JSON админки сравнивает свой токен. Токен API эти пути не открывает.
+      const expected = isAdminApi(c.req.path) ? adminToken : options.token;
+      if (!bearerMatches(expected, header)) {
         throw new ApiError("unauthorized");
       }
     }
@@ -78,6 +90,37 @@ export function createApi(options: CreateApiOptions): Hono<ApiEnv> {
     return c.json(body, 409);
   });
 
+  app.get("/admin", () => serveAdminAsset("index.html"));
+  app.get("/admin/*", (c) => serveAdminAsset(adminRelativePath(c.req.path)));
+
+  app.get("/v1/admin/runs", async (c) => {
+    const runs = await listAdminRuns(options.sql);
+    c.header("X-Content-Type-Options", "nosniff");
+    return c.json({ runs });
+  });
+
+  app.get("/v1/admin/runs/:id/steps", async (c) => {
+    const runId = parseRunId(c.req.param("id"));
+    const steps = await listAdminSteps(options.sql, runId);
+    if (steps === null) {
+      throw new ApiError("not_found");
+    }
+    c.header("X-Content-Type-Options", "nosniff");
+    return c.json({ steps });
+  });
+
+  app.get("/v1/admin/agents", async (c) => {
+    const agents = await listAdminAgents(options.sql);
+    c.header("X-Content-Type-Options", "nosniff");
+    return c.json({ agents });
+  });
+
+  app.get("/v1/admin/crons", async (c) => {
+    const crons = await listAdminCrons(options.sql);
+    c.header("X-Content-Type-Options", "nosniff");
+    return c.json({ crons });
+  });
+
   app.get("/v1/runs/:id", async (c) => {
     const runId = parseRunId(c.req.param("id"));
     c.set("runId", runId);
@@ -110,8 +153,43 @@ export function createApi(options: CreateApiOptions): Hono<ApiEnv> {
   return app;
 }
 
-function isPublicHealth(method: string, path: string): boolean {
-  return method === "GET" && path === "/health";
+function isPublicRoute(method: string, requestPath: string): boolean {
+  if (method !== "GET") {
+    return false;
+  }
+  return requestPath === "/health" || isAdminPage(requestPath);
+}
+
+function isAdminPage(requestPath: string): boolean {
+  return requestPath === "/admin" || requestPath.startsWith("/admin/");
+}
+
+function isAdminApi(requestPath: string): boolean {
+  return requestPath === "/v1/admin" || requestPath.startsWith("/v1/admin/");
+}
+
+function adminRelativePath(requestPath: string): string {
+  const prefix = "/admin/";
+  if (!requestPath.startsWith(prefix)) {
+    return "";
+  }
+  const relative = requestPath.slice(prefix.length);
+  return relative.length === 0 ? "index.html" : relative;
+}
+
+async function serveAdminAsset(userPath: string): Promise<Response> {
+  const asset = await readWebAsset(userPath);
+  if (asset === null) {
+    throw new ApiError("not_found");
+  }
+  return new Response(asset.body, {
+    status: 200,
+    headers: {
+      "content-type": asset.mediaType,
+      "x-content-type-options": "nosniff",
+      "cache-control": "no-store",
+    },
+  });
 }
 
 /** Идентификатор запуска — uuid. Длину проверяем до посимвольного разбора. */

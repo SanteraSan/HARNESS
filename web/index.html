@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>HARNESS</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      body {
+        margin: 0;
+        font-family: sans-serif;
+        background: #f4f1ea;
+        color: #1c1915;
+      }
+      header,
+      main {
+        padding: 1rem 1.25rem;
+      }
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: end;
+        border-bottom: 1px solid #d9d3c7;
+      }
+      label {
+        display: grid;
+        gap: 0.25rem;
+      }
+      input,
+      button {
+        font: inherit;
+      }
+      input {
+        padding: 0.35rem 0.5rem;
+        min-width: 16rem;
+      }
+      button {
+        padding: 0.4rem 0.7rem;
+      }
+      main {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+        gap: 1rem;
+      }
+      section {
+        background: #fff;
+        border: 1px solid #d9d3c7;
+        padding: 0.75rem 1rem;
+        min-height: 8rem;
+      }
+      h1,
+      h2 {
+        font-weight: 600;
+      }
+      h1 {
+        margin: 0;
+        font-size: 1.25rem;
+      }
+      h2 {
+        margin: 0 0 0.5rem;
+        font-size: 1rem;
+      }
+      ul {
+        margin: 0;
+        padding-left: 1.1rem;
+      }
+      li {
+        margin: 0.35rem 0;
+      }
+      #notice {
+        margin: 0.5rem 0 0;
+        min-height: 1.2rem;
+      }
+      .run {
+        font: inherit;
+        background: none;
+        border: 0;
+        padding: 0;
+        color: #1c4f8a;
+        text-align: left;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>HARNESS</h1>
+      <label>
+        Токен
+        <input id="token" type="password" autocomplete="off" spellcheck="false" />
+      </label>
+      <button type="button" id="show">Показать</button>
+      <p id="notice"></p>
+    </header>
+    <main>
+      <section>
+        <h2>Запуски</h2>
+        <ul id="runs"></ul>
+      </section>
+      <section>
+        <h2>Шаги</h2>
+        <ul id="steps"></ul>
+      </section>
+      <section>
+        <h2>Агенты</h2>
+        <ul id="agents"></ul>
+      </section>
+      <section>
+        <h2>Кроны</h2>
+        <ul id="crons"></ul>
+      </section>
+    </main>
+    <script>
+      const tokenInput = document.querySelector("#token");
+      const notice = document.querySelector("#notice");
+      const show = document.querySelector("#show");
+      if (!(tokenInput instanceof HTMLInputElement) || notice === null || show === null) {
+        throw new Error("admin page is incomplete");
+      }
+
+      show.addEventListener("click", () => {
+        void loadAll();
+      });
+
+      async function loadAll() {
+        notice.textContent = "";
+        const token = tokenInput.value;
+        const runs = await getJson("/v1/admin/runs", token);
+        const agents = await getJson("/v1/admin/agents", token);
+        const crons = await getJson("/v1/admin/crons", token);
+        if (runs === null || agents === null || crons === null) {
+          renderRuns(null);
+          renderAgents(null);
+          renderCrons(null);
+          renderSteps(null);
+          return;
+        }
+        renderRuns(runs);
+        renderAgents(agents);
+        renderCrons(crons);
+        const first = firstRunId(runs);
+        if (first === null) {
+          renderSteps(null);
+          return;
+        }
+        renderSteps(await getJson("/v1/admin/runs/" + encodeURIComponent(first) + "/steps", token));
+      }
+
+      async function getJson(url, token) {
+        const response = await fetch(url, {
+          headers: { authorization: "Bearer " + token },
+        });
+        if (!response.ok) {
+          notice.textContent = "Отказ " + String(response.status);
+          return null;
+        }
+        return response.json();
+      }
+
+      function firstRunId(payload) {
+        const rows = rowsOf(payload, "runs");
+        const row = rows[0];
+        if (row === undefined) {
+          return null;
+        }
+        const id = row.id;
+        return typeof id === "string" && isRunId(id) ? id : null;
+      }
+
+      function rowsOf(payload, key) {
+        if (payload === null || typeof payload !== "object") {
+          return [];
+        }
+        const value = payload[key];
+        return Array.isArray(value) ? value : [];
+      }
+
+      function renderRuns(payload) {
+        const list = document.querySelector("#runs");
+        if (list === null) {
+          return;
+        }
+        list.replaceChildren();
+        for (const row of rowsOf(payload, "runs")) {
+          const item = document.createElement("li");
+          const id = typeof row.id === "string" ? row.id : "";
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "run";
+          button.textContent = field(row, "status") + " " + id;
+          button.addEventListener("click", () => {
+            void loadSteps(id);
+          });
+          item.append(button);
+          list.append(item);
+        }
+      }
+
+      async function loadSteps(id) {
+        if (!isRunId(id)) {
+          return;
+        }
+        renderSteps(
+          await getJson("/v1/admin/runs/" + encodeURIComponent(id) + "/steps", tokenInput.value),
+        );
+      }
+
+      function renderSteps(payload) {
+        fill("#steps", rowsOf(payload, "steps"), (row) => {
+          return (
+            field(row, "step_index") + " " + field(row, "kind") + " " + field(row, "tool_name")
+          );
+        });
+      }
+
+      function renderAgents(payload) {
+        const list = document.querySelector("#agents");
+        if (list === null) {
+          return;
+        }
+        list.replaceChildren();
+        for (const row of rowsOf(payload, "agents")) {
+          const item = document.createElement("li");
+          item.textContent =
+            field(row, "slug") + " " + field(row, "display_name") + " " + field(row, "model_alias");
+          const names = row.tool_allowlist;
+          if (Array.isArray(names)) {
+            const line = document.createElement("div");
+            const shown = [];
+            for (const name of names) {
+              if (typeof name === "string") {
+                shown.push(name);
+              }
+            }
+            line.textContent = shown.join(", ");
+            item.append(line);
+          }
+          const secrets = row.secrets;
+          if (Array.isArray(secrets)) {
+            const nested = document.createElement("ul");
+            for (const secret of secrets) {
+              const secretItem = document.createElement("li");
+              secretItem.textContent = field(secret, "name") + " " + field(secret, "secret");
+              nested.append(secretItem);
+            }
+            item.append(nested);
+          }
+          list.append(item);
+        }
+      }
+
+      function renderCrons(payload) {
+        fill("#crons", rowsOf(payload, "crons"), (row) => {
+          const paused = row.paused === true ? "paused" : "active";
+          return field(row, "kind") + " " + field(row, "schedule") + " " + paused;
+        });
+      }
+
+      function fill(selector, rows, label) {
+        const list = document.querySelector(selector);
+        if (list === null) {
+          return;
+        }
+        list.replaceChildren();
+        for (const row of rows) {
+          const item = document.createElement("li");
+          item.textContent = label(row);
+          list.append(item);
+        }
+      }
+
+      function field(row, key) {
+        if (row === null || typeof row !== "object") {
+          return "";
+        }
+        const value = row[key];
+        if (typeof value === "string" || typeof value === "number") {
+          return String(value);
+        }
+        return "";
+      }
+
+      function isRunId(value) {
+        if (value.length !== 36) {
+          return false;
+        }
+        for (let index = 0; index < value.length; index += 1) {
+          const code = value.charCodeAt(index);
+          const dash = index === 8 || index === 13 || index === 18 || index === 23;
+          if (dash) {
+            if (code !== 45) {
+              return false;
+            }
+            continue;
+          }
+          const hex =
+            (code >= 48 && code <= 57) || (code >= 97 && code <= 102) || (code >= 65 && code <= 70);
+          if (!hex) {
+            return false;
+          }
+        }
+        return true;
+      }
+    </script>
+  </body>
+</html>

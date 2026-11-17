@@ -16,6 +16,7 @@ const envSchema = z.object({
   LITELLM_API_KEY: z.string().default(""),
   CONNECTOR_SECRETS_KEY: z.string().default(""),
   HARNESS_API_TOKEN: z.string().default(""),
+  HARNESS_ADMIN_TOKEN: z.string().default(""),
   TELEGRAM_BOT_TOKEN: z.string().default(""),
   TELEGRAM_ALLOWED_USER_IDS: z.string().default(""),
   AGENT_SLUG: z.string().min(1).default("clerk"),
@@ -40,6 +41,7 @@ export interface Config {
   litellmApiKey: string;
   connectorSecretsKey: string;
   harnessApiToken: string;
+  harnessAdminToken: string;
   telegramBotToken: string;
   telegramAllowedUserIds: readonly string[];
   agentSlug: string;
@@ -74,6 +76,8 @@ export const logger = pino({
       "litellmApiKey",
       "HARNESS_API_TOKEN",
       "harnessApiToken",
+      "HARNESS_ADMIN_TOKEN",
+      "harnessAdminToken",
       "TELEGRAM_BOT_TOKEN",
       "telegramBotToken",
       "CONNECTOR_SECRETS_KEY",
@@ -112,6 +116,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     litellmApiKey: data.LITELLM_API_KEY,
     connectorSecretsKey: data.CONNECTOR_SECRETS_KEY,
     harnessApiToken: data.HARNESS_API_TOKEN,
+    harnessAdminToken: data.HARNESS_ADMIN_TOKEN,
     telegramBotToken: data.TELEGRAM_BOT_TOKEN,
     telegramAllowedUserIds: parseIdList(data.TELEGRAM_ALLOWED_USER_IDS),
     agentSlug: data.AGENT_SLUG,
@@ -230,6 +235,9 @@ function pickEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   }
   if (env.HARNESS_API_TOKEN !== undefined) {
     raw.HARNESS_API_TOKEN = env.HARNESS_API_TOKEN;
+  }
+  if (env.HARNESS_ADMIN_TOKEN !== undefined) {
+    raw.HARNESS_ADMIN_TOKEN = env.HARNESS_ADMIN_TOKEN;
   }
   if (env.CONNECTOR_SECRETS_KEY !== undefined) {
     raw.CONNECTOR_SECRETS_KEY = env.CONNECTOR_SECRETS_KEY;
