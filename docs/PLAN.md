@@ -73,7 +73,7 @@ todos:
     status: done
   - id: m3-p7
     content: "M3-P7 Внешний чат без инструментов и с минимальным размышлением"
-    status: in_progress
+    status: done
   - id: m4-p1
     content: "M4-P1 Шлюз картинок FLUX.2 Klein 4B: одна видеокарта, генерация и правка"
     status: pending
@@ -85,7 +85,7 @@ todos:
     status: pending
   - id: m5-p1
     content: "M5-P1 Вызов сервиса и отчёт harness.tool.v2"
-    status: pending
+    status: in_progress
 isProject: false
 ---
 
@@ -863,7 +863,7 @@ M2-4   P6 после P2, P3, P4, P5
 
 ### M3-P7. Внешний чат без инструментов и с минимальным размышлением
 
-- Волна: M3-4. Зависит от: M3-P6 `done`. Статус: `in_progress`.
+- Волна: M3-4. Зависит от: M3-P6 `done`. Статус: `done`.
 - Пути: `src/runner/openai-compat.ts`, `src/model/litellm.ts`, `src/contracts/types.ts`, `test/runner/**`, `test/model/**`.
 - Зачем: один вопрос про модели картинок ушёл в `coder-cloud` тремя вызовами за 4 минуты 24 секунды. Модель открыла каталог, прочитала постороннюю заметку и только третьим вызовом написала ответ. Вопрос файлов не касался. Системный промпт клерка требует ответ по результатам инструментов, поэтому внешняя модель тратит отдельные вызовы на `list_dir` и `read_file`.
 - Уже требуется и не откатывается: если алиас хода `coder-cloud` или `provider = external`, список инструментов пуст, ключ `tools` в JSON не пишется, результаты локальных инструментов в запрос не входят. Вызов модели по этому алиасу один. Если в ответе есть `tool_calls`, запуск `failed` без второго вызова и без `execute`. Алиас `agent`, запуск без выбора, API, cron и delegation список инструментов не теряют. Имя вне allowlist маршрут не переключает.
@@ -945,7 +945,7 @@ ComfyUI уже стоит в `/home/santera/ComfyUI`, версия 0.44.0, уз�
 
 ### M5-P1. Вызов сервиса и отчёт
 
-- Волна: M5-0. Зависит от: M3-P7 `done`. Статус: `pending`.
+- Волна: M5-0. Зависит от: M3-P7 `done`. Статус: `in_progress`. Код вызова уже на `dev`: этот заход сверяет его с разделом и закрывает дыры DoD, вторую реализацию не пишет.
 - Ворота: выдавать, когда M3-P7 `done` и его `exclusive_paths` свободны. Параллельно с M3-P7 не выдавать: оба пишут `src/runner/openai-compat.ts`. M4 не ждать. Репозиторий `harness-files` не клонировать и не начинать до `done` этого пакета.
 - Ветка: `m1/m5-p1-service-report`. Схема веток репозитория — `m1/<id>`, отдельный префикс `m5/` не заводить.
 - Пути: `migrations/012_service_reports.sql`, `src/services/**`, `src/runner/openai-compat.ts` (только ветка вызова; пустой список `coder-cloud` и `reasoning_effort` не снимать), `src/worker.ts` (уборка в уже существующем `runIteration`), `src/config.ts` (путь манифеста, сумма, секрет по имени из манифеста), `.env.example` (пустые `SERVICES_MANIFEST` и `SERVICES_MANIFEST_SHA256`), `test/services/**`, `test/helpers/db.ts` (только `delete` новых таблиц до `run_steps`).
