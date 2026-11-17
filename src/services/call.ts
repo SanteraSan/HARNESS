@@ -2,13 +2,14 @@ import { randomUUID } from "node:crypto";
 
 import { canonicalBody } from "../../contract/canonical.js";
 import { codePointLength } from "../../contract/data.js";
-import { omitIdempotencyArgument, parseToolArguments } from "../../contract/tools.js";
+import { omitIdempotencyArgument } from "../../contract/tools.js";
 import { TOOL_CALL_ID_RE } from "../../contract/limits.js";
 import type { ServiceEntry, ServiceTool } from "../../contract/manifest.js";
 import { JSON_BODY_LIMIT_BYTES } from "../../contract/limits.js";
 import { redact } from "../model/redact.js";
 import type { Sql } from "../db/client.js";
 import { prepareToolResultForModel, MODEL_TOOL_TEXT_CHARS } from "../runner/tool-result-text.js";
+import { parseServiceToolArguments } from "./arguments.js";
 import { parseServiceEnvelope, SERVICE_CONTRACT } from "./envelope.js";
 import { decideReport } from "./report.js";
 import {
@@ -56,7 +57,9 @@ export async function executeServiceCall(input: ServiceCallInput): Promise<Servi
   if (!omitted.ok) {
     return invalid(fallback);
   }
-  const parsed = parseToolArguments(input.tool.name, omitted.value);
+  // Три локальных имени остаются на parseToolArguments. Чужое имя — схема манифеста.
+  // Отказ здесь раньше insertPending и fetch: лишнее поле сеть не открывает.
+  const parsed = parseServiceToolArguments(input.tool, omitted.value);
   if (!parsed.ok) {
     return invalid(fallback);
   }
