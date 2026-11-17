@@ -85,7 +85,7 @@ todos:
     status: pending
   - id: m5-p1
     content: "M5-P1 Вызов сервиса и отчёт harness.tool.v2"
-    status: in_progress
+    status: done
 isProject: false
 ---
 
@@ -945,7 +945,7 @@ ComfyUI уже стоит в `/home/santera/ComfyUI`, версия 0.44.0, уз�
 
 ### M5-P1. Вызов сервиса и отчёт
 
-- Волна: M5-0. Зависит от: M3-P7 `done`. Статус: `in_progress`. Код вызова уже на `dev`: этот заход сверяет его с разделом и закрывает дыры DoD, вторую реализацию не пишет.
+- Волна: M5-0. Зависит от: M3-P7 `done`. Статус: `done`. Сверка кода с `dev` принята; вторая реализация не писалась.
 - Ворота: выдавать, когда M3-P7 `done` и его `exclusive_paths` свободны. Параллельно с M3-P7 не выдавать: оба пишут `src/runner/openai-compat.ts`. M4 не ждать. Репозиторий `harness-files` не клонировать и не начинать до `done` этого пакета.
 - Ветка: `m1/m5-p1-service-report`. Схема веток репозитория — `m1/<id>`, отдельный префикс `m5/` не заводить.
 - Пути: `migrations/012_service_reports.sql`, `src/services/**`, `src/runner/openai-compat.ts` (только ветка вызова; пустой список `coder-cloud` и `reasoning_effort` не снимать), `src/worker.ts` (уборка в уже существующем `runIteration`), `src/config.ts` (путь манифеста, сумма, секрет по имени из манифеста), `.env.example` (пустые `SERVICES_MANIFEST` и `SERVICES_MANIFEST_SHA256`), `test/services/**`, `test/helpers/db.ts` (только `delete` новых таблиц до `run_steps`).
