@@ -326,6 +326,30 @@ describe("service call", () => {
     expect(rows[0]).toEqual({ status: "completed", transport_code: null });
   });
 
+  it("должен повторить запись, если тело оборвалось после заголовков", async () => {
+    const runId = await insertRun();
+    const bodies: string[] = [];
+    handler = async (req, res) => {
+      const raw = await readRequest(req);
+      bodies.push(raw);
+      if (bodies.length === 1) {
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.write("{");
+        res.destroy();
+        return;
+      }
+      json(res, 200, reply(raw, { text: "после куска" }));
+    };
+    const outcome = await call(runId, noteTool, { path: "out/a.txt", text: "hello" });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toBe(bodies[1]);
+    expect(outcome.text).toBe("после куска");
+    const rows = await sql<{ status: string; transport_code: string | null }[]>`
+      select status, transport_code from service_invocations where run_id = ${runId}
+    `;
+    expect(rows[0]).toEqual({ status: "completed", transport_code: null });
+  });
+
   it("должен не менять runs.prompt_tokens заявленными токенами", async () => {
     const runId = await insertRun();
     handler = async (req, res) => {

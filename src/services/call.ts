@@ -267,7 +267,16 @@ async function send(input: ServiceCallInput, bytes: Buffer, timeoutMs: number): 
     }
     return { kind: "transport", code: "connection_error", httpStatus: null, bytes: null };
   }
-  const received = await readLimited(response);
+  let received: Awaited<ReturnType<typeof readLimited>>;
+  try {
+    received = await readLimited(response);
+  } catch (error) {
+    // Обрыв после заголовков иначе минует повтор записи и оставляет pending.
+    if (isTimeout(error)) {
+      return { kind: "timeout" };
+    }
+    return { kind: "transport", code: "connection_error", httpStatus: response.status, bytes: null };
+  }
   if ("tooLarge" in received) {
     return { kind: "transport", code: "payload_too_large", httpStatus: response.status, bytes: null };
   }

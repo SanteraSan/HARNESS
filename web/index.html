@@ -122,16 +122,22 @@
         throw new Error("admin page is incomplete");
       }
 
+      let stepsGeneration = 0;
+
       show.addEventListener("click", () => {
         void loadAll();
       });
 
       async function loadAll() {
+        const generation = ++stepsGeneration;
         notice.textContent = "";
         const token = tokenInput.value;
         const runs = await getJson("/v1/admin/runs", token);
         const agents = await getJson("/v1/admin/agents", token);
         const crons = await getJson("/v1/admin/crons", token);
+        if (generation !== stepsGeneration) {
+          return;
+        }
         if (runs === null || agents === null || crons === null) {
           renderRuns(null);
           renderAgents(null);
@@ -147,7 +153,11 @@
           renderSteps(null);
           return;
         }
-        renderSteps(await getJson("/v1/admin/runs/" + encodeURIComponent(first) + "/steps", token));
+        const steps = await getJson("/v1/admin/runs/" + encodeURIComponent(first) + "/steps", token);
+        if (generation !== stepsGeneration) {
+          return;
+        }
+        renderSteps(steps);
       }
 
       async function getJson(url, token) {
@@ -204,9 +214,15 @@
         if (!isRunId(id)) {
           return;
         }
-        renderSteps(
-          await getJson("/v1/admin/runs/" + encodeURIComponent(id) + "/steps", tokenInput.value),
+        const generation = ++stepsGeneration;
+        const steps = await getJson(
+          "/v1/admin/runs/" + encodeURIComponent(id) + "/steps",
+          tokenInput.value,
         );
+        if (generation !== stepsGeneration) {
+          return;
+        }
+        renderSteps(steps);
       }
 
       function renderSteps(payload) {

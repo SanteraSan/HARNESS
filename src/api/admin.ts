@@ -211,18 +211,20 @@ export async function listAdminAgents(sql: Sql): Promise<AdminAgentJson[]> {
       order by slug asc, id asc
       limit 100
     `;
-    // Имя и маска. Колонки шифртекста, nonce и salt в выборку не входят.
-    const secrets = await tx<Record<string, unknown>[]>`
-      select g.agent_id, s.name
-      from connector_secret_grants g
-      join connector_secrets s on s.id = g.secret_id
-      join agents a on a.id = g.agent_id
-      where a.tenant_id = 'local'
-        and s.tenant_id = 'local'
-        and g.agent_id is not null
-      order by s.name asc
-      limit 100
-    `;
+    // Лимит 100 — у агентов. Связи этих строк не режем: иначе у возвращённого агента секреты выглядят пустыми.
+    const agentIds = rows.map((row) => requireText(row.id));
+    const secrets =
+      agentIds.length === 0
+        ? []
+        : await tx<Record<string, unknown>[]>`
+            select g.agent_id, s.name
+            from connector_secret_grants g
+            join connector_secrets s on s.id = g.secret_id
+            where g.agent_id in ${tx(agentIds)}
+              and s.tenant_id = 'local'
+              and g.agent_id is not null
+            order by s.name asc
+          `;
     return mapAgents(rows, secrets);
   });
 }
@@ -495,11 +497,15 @@ function requireText(value: unknown): string {
   return value;
 }
 
+/** Пустая строка — то, что лежит в колонке. null — отсутствие. Журнал пишет '' без замены. */
 function requireTextOrNull(value: unknown): string | null {
   if (value === null) {
     return null;
   }
-  return requireText(value);
+  if (typeof value !== "string") {
+    throw new ApiError("internal_error");
+  }
+  return value;
 }
 
 function requireBoolean(value: unknown): boolean {

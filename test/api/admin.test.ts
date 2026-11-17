@@ -176,6 +176,73 @@ describe("admin", () => {
     expect(clerk.secrets).toEqual([{ name: "shop-token", secret: SECRET_MASK }]);
   });
 
+  it("должен показать секрет агента, который не попал в первые сто связей", async () => {
+    const secondId = "00000000-0000-4000-8000-0000000000bb";
+    await insertAgent(secondId, "local", "zeta");
+    const sealed = secretBytes();
+    await sql`
+      insert into connector_secrets (tenant_id, name, ciphertext, nonce, salt)
+      select
+        'local',
+        'a-' || lpad(g::text, 3, '0'),
+        ${sealed.ciphertext},
+        ${sealed.nonce},
+        ${sealed.salt}
+      from generate_series(1, 100) as g
+    `;
+    await sql`
+      insert into connector_secret_grants (secret_id, agent_id)
+      select id, ${AGENT_ID}::uuid
+      from connector_secrets
+      where tenant_id = 'local'
+        and name like 'a-%'
+    `;
+    await insertSecret("local", "z-visible", sealed, secondId, null);
+
+    const response = await send(app, "/v1/admin/agents", adminAuth());
+    expect(response.status).toBe(200);
+    const body = requiredRecord(JSON.parse(await response.text()) as unknown);
+    const clerk = findAgent(body, "clerk");
+    const zeta = findAgent(body, "zeta");
+    expect(clerk.secrets).toHaveLength(100);
+    expect(zeta.secrets).toEqual([{ name: "z-visible", secret: SECRET_MASK }]);
+    await sql`delete from agents where id = ${secondId}`;
+  });
+
+  it("должен отдать пустые final_text и response_excerpt, не роняя список", async () => {
+    const runId = await insertRun("local", AGENT_ID, "empty-text", "пусто");
+    await sql`update runs set final_text = '' where id = ${runId}`;
+    await insertStep(runId, "");
+
+    const runs = await send(app, "/v1/admin/runs", adminAuth());
+    expect(runs.status).toBe(200);
+    const runBody = requiredRecord(JSON.parse(await runs.text()) as unknown);
+    const rows = runBody.runs;
+    if (!Array.isArray(rows)) {
+      throw new Error("runs missing");
+    }
+    const match = rows.find((row) => {
+      return typeof row === "object" && row !== null && "id" in row && row.id === runId;
+    });
+    if (typeof match !== "object" || match === null || !("final_text" in match)) {
+      throw new Error("run missing");
+    }
+    expect(match.final_text).toBe("");
+
+    const steps = await send(app, `/v1/admin/runs/${runId}/steps`, adminAuth());
+    expect(steps.status).toBe(200);
+    const stepBody = requiredRecord(JSON.parse(await steps.text()) as unknown);
+    const stepRows = stepBody.steps;
+    if (!Array.isArray(stepRows) || stepRows.length !== 1) {
+      throw new Error("step missing");
+    }
+    const step = stepRows[0];
+    if (typeof step !== "object" || step === null || !("response_excerpt" in step)) {
+      throw new Error("excerpt missing");
+    }
+    expect(step.response_excerpt).toBe("");
+  });
+
   it("должен вернуть не больше 100 запусков и не показать более новый чужой", async () => {
     await insertAgent(FOREIGN_AGENT_ID, "other", "foreign");
     await sql`
