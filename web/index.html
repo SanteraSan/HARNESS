@@ -122,6 +122,7 @@
         throw new Error("admin page is incomplete");
       }
 
+      let listGeneration = 0;
       let stepsGeneration = 0;
 
       show.addEventListener("click", () => {
@@ -129,15 +130,17 @@
       });
 
       async function loadAll() {
-        const generation = ++stepsGeneration;
+        const generation = ++listGeneration;
         notice.textContent = "";
         const token = tokenInput.value;
         const runs = await getJson("/v1/admin/runs", token);
         const agents = await getJson("/v1/admin/agents", token);
         const crons = await getJson("/v1/admin/crons", token);
-        if (generation !== stepsGeneration) {
+        if (generation !== listGeneration) {
           return;
         }
+        // Новый список отменяет шаги старого выбора. loadSteps этот счётчик не трогает.
+        const stepsToken = ++stepsGeneration;
         if (runs === null || agents === null || crons === null) {
           renderRuns(null);
           renderAgents(null);
@@ -154,7 +157,7 @@
           return;
         }
         const steps = await getJson("/v1/admin/runs/" + encodeURIComponent(first) + "/steps", token);
-        if (generation !== stepsGeneration) {
+        if (stepsToken !== stepsGeneration) {
           return;
         }
         renderSteps(steps);
