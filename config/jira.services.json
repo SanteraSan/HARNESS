@@ -1,0 +1,173 @@
+{
+  "contract": "harness.services.v1",
+  "services": [
+    {
+      "id": "jira",
+      "base_url": "http://127.0.0.1:8791",
+      "auth": { "type": "bearer", "env": "JIRA_SERVICE_BEARER" },
+      "tools": [
+        {
+          "name": "create_backlog_issue",
+          "version": "1",
+          "effect": "write",
+          "description": "Создаёт задачу в проекте.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["project_key", "summary"],
+            "properties": {
+              "project_key": { "type": "string", "minLength": 1, "maxLength": 10 },
+              "summary": { "type": "string", "minLength": 1, "maxLength": 255 },
+              "text": { "type": "string", "minLength": 0, "maxLength": 4000 }
+            }
+          }
+        },
+        {
+          "name": "transition_issue",
+          "version": "1",
+          "effect": "write",
+          "description": "Переводит задачу по имени перехода.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue_key", "transition_name"],
+            "properties": {
+              "issue_key": { "type": "string", "minLength": 1, "maxLength": 32 },
+              "transition_name": { "type": "string", "minLength": 1, "maxLength": 80 }
+            }
+          }
+        },
+        {
+          "name": "get_issue",
+          "version": "1",
+          "effect": "read",
+          "description": "Читает задачу по ключу.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue_key"],
+            "properties": {
+              "issue_key": { "type": "string", "minLength": 1, "maxLength": 32 }
+            }
+          }
+        },
+        {
+          "name": "find_issues",
+          "version": "1",
+          "effect": "read",
+          "description": "Ищет задачи. Все поля можно опустить.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "project_key": { "type": "string", "minLength": 1, "maxLength": 10 },
+              "text": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "status": { "type": "string", "minLength": 1, "maxLength": 64 }
+            }
+          }
+        },
+        {
+          "name": "move_issue_to_sprint",
+          "version": "1",
+          "effect": "write",
+          "description": "Переносит задачу в спринт.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue_key"],
+            "properties": {
+              "issue_key": { "type": "string", "minLength": 1, "maxLength": 32 },
+              "sprint_id": { "type": "string", "minLength": 1, "maxLength": 18 },
+              "sprint_name": { "type": "string", "minLength": 1, "maxLength": 80 }
+            }
+          }
+        },
+        {
+          "name": "assign_issue",
+          "version": "1",
+          "effect": "write",
+          "description": "Назначает исполнителя задачи.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue_key", "assignee"],
+            "properties": {
+              "issue_key": { "type": "string", "minLength": 1, "maxLength": 32 },
+              "assignee": { "type": "string", "minLength": 0, "maxLength": 200 }
+            }
+          }
+        },
+        {
+          "name": "add_issue_comment",
+          "version": "1",
+          "effect": "write",
+          "description": "Добавляет комментарий к задаче.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue_key", "text"],
+            "properties": {
+              "issue_key": { "type": "string", "minLength": 1, "maxLength": 32 },
+              "text": { "type": "string", "minLength": 1, "maxLength": 4000 }
+            }
+          }
+        },
+        {
+          "name": "set_issue_description",
+          "version": "1",
+          "effect": "write",
+          "description": "Записывает описание задачи.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue_key", "description"],
+            "properties": {
+              "issue_key": { "type": "string", "minLength": 1, "maxLength": 32 },
+              "description": { "type": "string", "minLength": 0, "maxLength": 4000 }
+            }
+          }
+        },
+        {
+          "name": "update_issue_labels",
+          "version": "1",
+          "effect": "write",
+          "description": "Принимает ключ задачи для меток.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue_key"],
+            "properties": {
+              "issue_key": { "type": "string", "minLength": 1, "maxLength": 32 }
+            }
+          }
+        },
+        {
+          "name": "add_remote_link",
+          "version": "1",
+          "effect": "write",
+          "description": "Добавляет ссылку к задаче.",
+          "accepts_blobs": false,
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue_key", "url", "title"],
+            "properties": {
+              "issue_key": { "type": "string", "minLength": 1, "maxLength": 32 },
+              "url": { "type": "string", "minLength": 1, "maxLength": 2000 },
+              "title": { "type": "string", "minLength": 1, "maxLength": 255 }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

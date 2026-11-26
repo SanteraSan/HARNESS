@@ -125,6 +125,54 @@ describe("LiteLLMChatModel", () => {
     );
   });
 
+  it("должен не писать ключ tools, когда список пуст", async () => {
+    await withServer({ status: 200, body: textCompletion("готово") }, async ({ baseUrl, requests }) => {
+      const model = new LiteLLMChatModel({ baseUrl, apiKey });
+      await model.complete(userInput());
+      const body = requests[0]?.body;
+      expect(body).toMatchObject({ model: "agent" });
+      expect(body).not.toHaveProperty("tools");
+      expect(body).not.toHaveProperty("reasoning_effort");
+    });
+  });
+
+  it("должен записать reasoning_effort none и не писать ключ tools", async () => {
+    await withServer({ status: 200, body: textCompletion("сразу") }, async ({ baseUrl, requests }) => {
+      const model = new LiteLLMChatModel({ baseUrl, apiKey });
+      await model.complete(
+        userInput({
+          model: "coder-cloud",
+          reasoningEffort: "none",
+          tools: [],
+          messages: [
+            {
+              role: "system",
+              content:
+                "Отвечай по результатам инструментов.\nВ этом ходе инструментов нет. Ответь на вопрос сразу, не открывая файлы.",
+              toolCallId: null,
+              toolCalls: null,
+            },
+            { role: "user", content: "вопрос", toolCallId: null, toolCalls: null },
+          ],
+        }),
+      );
+      const body = requests[0]?.body;
+      expect(body).not.toHaveProperty("tools");
+      expect(body).toMatchObject({
+        model: "coder-cloud",
+        reasoning_effort: "none",
+        messages: [
+          {
+            role: "system",
+            content:
+              "Отвечай по результатам инструментов.\nВ этом ходе инструментов нет. Ответь на вопрос сразу, не открывая файлы.",
+          },
+          { role: "user", content: "вопрос" },
+        ],
+      });
+    });
+  });
+
   it("должен оставить arguments строкой у одного tool call", async () => {
     await withServer(
       {
@@ -415,6 +463,47 @@ describe("LiteLLMChatModel", () => {
         return;
       }
       expect(caught.code).toBe("model_timeout");
+      await waitForClose(() => closed);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("должен закрыть сокет по сигналу отмены, не дожидаясь таймаута", async () => {
+    let closed = false;
+    let received: () => void = () => undefined;
+    const arrived = new Promise<void>((resolve) => {
+      received = resolve;
+    });
+    const server = createServer((req, res) => {
+      received();
+      req.on("close", () => {
+        closed = true;
+        res.end();
+      });
+    });
+    server.requestTimeout = 0;
+    await listen(server);
+    try {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        throw new Error("test server address");
+      }
+      const model = new LiteLLMChatModel({
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey,
+        timeoutMs: 5_000,
+      });
+      const controller = new AbortController();
+      const pending = model.complete(userInput({ signal: controller.signal }));
+      await arrived;
+      controller.abort();
+      const caught = await capture(() => pending);
+      expect(caught).toBeInstanceOf(ModelError);
+      if (!(caught instanceof ModelError)) {
+        return;
+      }
+      expect(caught.code).not.toBe("model_timeout");
       await waitForClose(() => closed);
     } finally {
       await closeServer(server);

@@ -14,7 +14,6 @@ import type {
   ModelOutput,
   Runner,
   Tool,
-  ToolCall,
 } from "../../src/contracts/index.js";
 import { createCronJob, tickCron } from "../../src/cron/index.js";
 import { createRunJournal } from "../../src/journal/index.js";
@@ -46,8 +45,24 @@ describe("m2 acceptance", () => {
     expect(rule).toEqual({ model_alias: "coder-cloud", provider: "external" });
 
     const script = scriptedModel([
-      toolOutput("record_note", noteArgs("out/one.txt", "первая", NOTE_KEY), "call-1"),
-      toolOutput("record_note", noteArgs("out/two.txt", "другая", NOTE_KEY), "call-2"),
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "call-1",
+            name: "record_note",
+            arguments: noteArgs("out/one.txt", "первая", NOTE_KEY),
+          },
+          {
+            id: "call-2",
+            name: "record_note",
+            arguments: noteArgs("out/two.txt", "другая", NOTE_KEY),
+          },
+        ],
+        promptTokens: 1,
+        completionTokens: 1,
+        model: "reported",
+      },
       textOutput("готово"),
     ]);
     const created = await queue.enqueue(enqueueInput("m2-note", { message: "запиши заметку" }));
@@ -66,11 +81,10 @@ describe("m2 acceptance", () => {
       expect(await noteNames(root)).toEqual(["one.txt"]);
     });
 
-    expect(script.inputs.map((input) => input.model)).toEqual([
-      "agent",
-      rule.model_alias,
-      rule.model_alias,
-    ]);
+    expect(script.inputs.map((input) => input.model)).toEqual(["agent", rule.model_alias]);
+    expect(script.inputs[1]?.tools).toEqual([]);
+    expect(script.inputs[1]?.messages.some((message) => message.role === "tool")).toBe(false);
+    expect(JSON.stringify(script.inputs[1]?.messages)).not.toContain("первая");
     const steps = await storedSteps(created.run.id);
     expect(steps.filter((step) => step.kind === "tool_result")).toEqual([
       expect.objectContaining({
@@ -134,6 +148,7 @@ describe("m2 acceptance", () => {
     });
 
     expect(external.inputs.map((input) => input.model)).toEqual([rule.model_alias]);
+    expect(external.inputs[0]?.tools).toEqual([]);
     const escalated = await storedRun(nextRun.run.id);
     expect(escalated.status).toBe("succeeded");
     expect(escalated.model_alias).toBe(rule.model_alias);
@@ -274,17 +289,6 @@ function textOutput(content: string): ModelOutput {
   return {
     content,
     toolCalls: [],
-    promptTokens: 1,
-    completionTokens: 1,
-    model: "reported",
-  };
-}
-
-function toolOutput(name: string, args: string, id: string): ModelOutput {
-  const call: ToolCall = { id, name, arguments: args };
-  return {
-    content: null,
-    toolCalls: [call],
     promptTokens: 1,
     completionTokens: 1,
     model: "reported",

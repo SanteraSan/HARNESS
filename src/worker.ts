@@ -1,8 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
-import { errorCode, isMainModule, loadConfig, logger } from "./config.js";
-import type { Config } from "./config.js";
+import { errorCode, isMainModule, loadConfig, logger, readServiceManifest } from "./config.js";
+import type { Config, ServiceManifestLoad } from "./config.js";
 import type {
   ChatModel,
   ClaimedRun,
@@ -18,11 +18,13 @@ import { createDelegationTools } from "./delegation/index.js";
 import { createRunJournal, type RunJournal } from "./journal/index.js";
 import { MAX_COMPLETION_TOKENS } from "./model/limits.js";
 import { LiteLLMChatModel, collectSecrets } from "./model/index.js";
-import { createRunQueue } from "./queue/index.js";
-import { ClaudeSdkRunner, unavailableClaudeSdkClient } from "./runner/claude-sdk.js";
+import { createModelSlots, createRunQueue, type ModelSlots } from "./queue/index.js";
 import { OpenAICompatRunner, type RunnerAgent } from "./runner/index.js";
+import { runModelTurn, type ModelTurnOptions } from "./runner/model-turn.js";
 import { type ChatModelAlias } from "./runner/openai-compat.js";
-import { resolveModel } from "./routing/resolve.js";
+import { createSecretVault, type SecretVault } from "./secrets/index.js";
+import { createServiceCatalog, maintainServiceRows } from "./services/index.js";
+import { assertFileRoot } from "./tools/file-root.js";
 import { toolRegistry } from "./tools/index.js";
 
 /** Пустая очередь: одна секунда, затем снова reap и один захват. */
@@ -36,12 +38,16 @@ const RUNNER_FAILED = "runner_failed";
 /**
  * Две реализации на один захват.
  * Нет поля — остаётся единственный runner из опций: тесты M1 подставляют один объект.
- * Процесс воркера поле задаёт и на каждом захвате зовёт resolveModel.
+ * Процесс воркера поле задаёт. Класс раннера от provider не зависит:
+ * external — алиас LiteLLM внутри OpenAI-совместимого раннера, не Claude SDK.
  */
 export interface RunnerSelection {
   /** Уже созданный OpenAI-совместимый раннер. Для local новый объект не строится. */
   local: Runner;
-  /** Вызывается только когда resolveModel вернул external. */
+  /**
+   * Не вызывается. SDK-раннер не выбирается, пока нет отдельного поля
+   * и песочница не подключена к самому ходу.
+   */
   createExternal(): Runner;
   loadAgent(agentId: string): Promise<RunnerAgent>;
   sql: Sql;
@@ -65,6 +71,10 @@ export interface WorkerLoopOptions {
   heartbeatSeconds: number;
   signal: AbortSignal;
   sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  /** После reap и до claim. Очередь этот модуль не импортирует. */
+  maintainServices?: () => Promise<void>;
+  /** Нет поля — тесты цикла без таблицы слотов. Процесс воркера поле задаёт. */
+  slots?: ModelSlots;
 }
 
 export class WorkerError extends Error {
@@ -86,8 +96,8 @@ interface LockGate {
 type IdleSleep = (milliseconds: number, signal: AbortSignal) => Promise<void>;
 
 /**
- * Цикл воркера. claim внутри итерации один: параллельного захвата в этом файле нет.
- * Пул воркеров не создаётся.
+ * Цикл одного процесса. claim внутри итерации один: второй запуск не стартует раньше.
+ * Дочерние воркеры не порождаются. Число процессов задаёт установка.
  */
 export async function runWorker(options: WorkerLoopOptions): Promise<void> {
   assertLoopOptions(options);
@@ -167,6 +177,12 @@ async function runIteration(options: WorkerLoopOptions, sleep: IdleSleep): Promi
   }
 
   await options.queue.reapExpired();
+  if (options.slots !== undefined) {
+    await options.slots.reapExpired();
+  }
+  if (options.maintainServices !== undefined) {
+    await options.maintainServices();
+  }
   if (options.signal.aborted) {
     return false;
   }
@@ -183,11 +199,15 @@ async function runIteration(options: WorkerLoopOptions, sleep: IdleSleep): Promi
   }
 
   logger.info({ run_id: claimed.id }, "run claimed");
-  await runClaimed(options, claimed);
+  await runClaimed(options, claimed, sleep);
   return !options.signal.aborted;
 }
 
-async function runClaimed(options: WorkerLoopOptions, claimed: ClaimedRun): Promise<void> {
+async function runClaimed(
+  options: WorkerLoopOptions,
+  claimed: ClaimedRun,
+  sleep: IdleSleep,
+): Promise<void> {
   const gate: LockGate = { held: true, active: true, timer: undefined };
   const timer = setInterval(() => {
     pulse(options, claimed.id, gate);
@@ -199,13 +219,22 @@ async function runClaimed(options: WorkerLoopOptions, claimed: ClaimedRun): Prom
   try {
     runner = await selectRunner(options, claimed);
     await passChatModelAlias(options, runner, claimed);
-    await runner.run(claimed, runnerContext(options, gate));
+    const ctx = runnerContext(options, gate);
+    if (options.slots !== undefined && runner instanceof OpenAICompatRunner) {
+      runner.assignModelTurn(modelTurnOf(options, sleep));
+      await runner.run(claimed, ctx);
+    } else if (options.slots !== undefined) {
+      await runSdkUnderSlot(options, claimed, runner, ctx, sleep);
+    } else {
+      await runner.run(claimed, ctx);
+    }
   } catch (error: unknown) {
     logger.error({ run_id: claimed.id, err: error }, "runner failed");
     await failOwnedRun(options, claimed.id, gate);
   } finally {
     if (runner instanceof OpenAICompatRunner) {
       runner.assignChatModelAlias(null);
+      runner.assignModelTurn(null);
     }
     gate.active = false;
     if (gate.timer !== undefined) {
@@ -215,12 +244,56 @@ async function runClaimed(options: WorkerLoopOptions, claimed: ClaimedRun): Prom
   }
 }
 
+function modelTurnOf(options: WorkerLoopOptions, sleep: IdleSleep): ModelTurnOptions {
+  const slots = options.slots;
+  if (slots === undefined) {
+    throw new WorkerError("model_slots_mismatch", "model slots are not configured");
+  }
+  return {
+    slots,
+    heartbeatSeconds: options.heartbeatSeconds,
+    signal: options.signal,
+    sleep,
+  };
+}
+
 /**
- * I1: модель остаётся за Runner. Провайдер берётся из resolveModel этого запуска.
- * На захвате эффектов инструментов ещё нет, поэтому смена алиаса внутри хода
- * остаётся в OpenAICompatRunner. Второй захват отсюда не делается.
- * local не вызывает createExternal: SDK-раннер для него не создаётся.
- * Выбор чата в этот выбор не входит: он не меняет provider захвата.
+ * Внешний раннер не зовёт ChatModel.complete. Слот держится на весь его ход
+ * и отпускается коротким UPDATE, succeeded отсюда не ставится.
+ */
+async function runSdkUnderSlot(
+  options: WorkerLoopOptions,
+  claimed: ClaimedRun,
+  runner: Runner,
+  ctx: RunnerContext,
+  sleep: IdleSleep,
+): Promise<void> {
+  await runModelTurn({
+    turn: modelTurnOf(options, sleep),
+    runId: claimed.id,
+    workerId: options.workerId,
+    leaseSeconds: options.leaseSeconds,
+    heartbeatRun: (runId, workerId, leaseSeconds) => ctx.heartbeat(runId, workerId, leaseSeconds),
+    onSlotLost: async () => {
+      await ctx.finish(claimed.id, options.workerId, {
+        status: "failed",
+        finalText: null,
+        error: "slot_lost",
+        modelAlias: null,
+        provider: null,
+        promptTokens: null,
+        completionTokens: null,
+      });
+    },
+    call: () => runner.run(claimed, ctx),
+    afterHeld: () => Promise.resolve(),
+  });
+}
+
+/**
+ * I1: модель остаётся за Runner. Алиас шлюза выбирает OpenAICompatRunner.
+ * provider = external не переключает класс раннера: пакета SDK нет,
+ * а песочница к этому ходу не подключена. parse_error раннер не меняет.
  */
 async function selectRunner(options: WorkerLoopOptions, claimed: ClaimedRun): Promise<Runner> {
   const selection = options.selection;
@@ -232,27 +305,13 @@ async function selectRunner(options: WorkerLoopOptions, claimed: ClaimedRun): Pr
   if (agent.id !== claimed.agentId) {
     throw new WorkerError("agent_mismatch", "agent does not match the run");
   }
-
-  const resolved = await resolveModel(
-    selection.sql,
-    {
-      id: agent.id,
-      tenantId: claimed.tenantId,
-      modelAlias: agent.modelAlias,
-      provider: agent.provider,
-    },
-    { toolEffects: [] },
-  );
-  if (resolved.provider === "local") {
-    return selection.local;
-  }
-  return selection.createExternal();
+  return selection.local;
 }
 
 /**
  * Воркер читает выбор и передаёт алиас в уже выбранный OpenAI-совместимый раннер.
- * API, cron и delegation до запроса не доходят. Выбор не создаёт ClaudeSdkRunner:
- * selectRunner уже взял реализацию по provider, а чат этот provider не меняет.
+ * API, cron и delegation до запроса не доходят. Захват не подменяет класс раннера:
+ * provider = external остаётся алиасом LiteLLM на том же клиенте.
  */
 async function passChatModelAlias(
   options: WorkerLoopOptions,
@@ -526,14 +585,62 @@ export function createWorkerChatModel(options: {
   });
 }
 
-function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): WorkerLoopOptions {
+/**
+ * Расхождение MODEL_SLOTS и count(*) останавливает процесс до захвата.
+ * В лог попадает код, не строка базы.
+ */
+export async function assertModelSlotCount(slots: ModelSlots, modelSlots: number): Promise<void> {
+  if (!Number.isSafeInteger(modelSlots) || modelSlots < 1) {
+    logger.error(
+      { code: "model_slots_mismatch", model_slots: modelSlots },
+      "model slot count mismatch",
+    );
+    throw new WorkerError("model_slots_mismatch", "model slot count does not match MODEL_SLOTS");
+  }
+  const rows = await slots.count();
+  if (rows !== modelSlots) {
+    logger.error(
+      { code: "model_slots_mismatch", model_slots: modelSlots, slot_rows: rows },
+      "model slot count mismatch",
+    );
+    throw new WorkerError("model_slots_mismatch", "model slot count does not match MODEL_SLOTS");
+  }
+}
+
+/** Проверка числа строк, затем цикл. Несовпадение не доходит до claimNext. */
+export async function runReadyWorker(
+  options: WorkerLoopOptions,
+  inventory: { slots: ModelSlots; modelSlots: number },
+): Promise<void> {
+  await assertModelSlotCount(inventory.slots, inventory.modelSlots);
+  await runWorker(options);
+}
+
+function workerLoopOptions(
+  config: Config,
+  sql: Sql,
+  signal: AbortSignal,
+  services: ServiceManifestLoad | null,
+  slots: ModelSlots,
+): WorkerLoopOptions {
   const secrets = collectSecrets({
     databaseUrl: config.databaseUrl,
     harnessTestDatabaseUrl: config.harnessTestDatabaseUrl,
     litellmApiKey: config.litellmApiKey,
     harnessApiToken: config.harnessApiToken,
     telegramBotToken: config.telegramBotToken,
+    connectorSecretsKey: config.connectorSecretsKey,
   });
+  // Bearer не читается из окружения: сейф отдаёт его в момент вызова по agent_id.
+  const catalog =
+    services === null
+      ? undefined
+      : createServiceCatalog({
+          sql,
+          manifest: services.manifest,
+          vault: vaultForManifest(sql, services.manifest, config.connectorSecretsKey),
+          redactSecrets: secrets,
+        });
   // Одна очередь процесса: дочерняя строка ждёт следующий захват этого воркера.
   const queue = createRunQueue(sql);
   const delegation = createDelegationTools({ sql, queue });
@@ -545,9 +652,8 @@ function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): Worke
     secrets,
     // Тот же пул процесса: правила и cost_usd не открывают второе соединение.
     sql,
+    services: catalog,
   });
-  // Пакет SDK не установлен: клиент передаётся снаружи класса и живёт только для external.
-  const sdkClient = unavailableClaudeSdkClient();
   return {
     queue,
     journal: createRunJournal(sql, secrets),
@@ -560,7 +666,7 @@ function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): Worke
     selection: {
       local: localRunner,
       createExternal(): Runner {
-        return new ClaudeSdkRunner({ client: sdkClient });
+        throw new WorkerError("sdk_runner_unavailable", "claude sdk runner is not selectable");
       },
       loadAgent(agentId: string): Promise<RunnerAgent> {
         return loadRunnerAgent(sql, agentId);
@@ -573,7 +679,24 @@ function workerLoopOptions(config: Config, sql: Sql, signal: AbortSignal): Worke
     leaseSeconds: config.leaseSeconds,
     heartbeatSeconds: config.heartbeatSeconds,
     signal,
+    maintainServices(): Promise<void> {
+      return maintainServiceRows(sql);
+    },
+    slots,
   };
+}
+
+function vaultForManifest(
+  sql: Sql,
+  manifest: ServiceManifestLoad["manifest"],
+  encryptionKey: string,
+): SecretVault | null {
+  for (const service of manifest.services) {
+    if (service.auth.type === "bearer") {
+      return createSecretVault(sql, encryptionKey);
+    }
+  }
+  return null;
 }
 
 async function ensureFileRoot(fileRoot: string): Promise<void> {
@@ -584,6 +707,7 @@ async function ensureFileRoot(fileRoot: string): Promise<void> {
   // Корень задаёт конфигурация процесса. Текст модели сюда не приходит.
   // eslint-disable-next-line security/detect-non-literal-fs-filename -- FILE_ROOT из конфига
   await mkdir(root, { recursive: true });
+  await assertFileRoot(root);
 }
 
 function installProcessGuards(): void {
@@ -599,6 +723,7 @@ function installProcessGuards(): void {
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  const services = await readServiceManifest(config);
   const sql = createSql(config.databaseUrl);
   await ensureFileRoot(config.fileRoot);
   const stop = new AbortController();
@@ -608,9 +733,11 @@ async function main(): Promise<void> {
     process.exit(0);
   });
   installProcessGuards();
-  logger.info({ worker_id: config.workerId }, "worker started");
+  const slots = createModelSlots(sql);
+  await assertModelSlotCount(slots, config.modelSlots);
+  logger.info({ worker_id: config.workerId, model_slots: config.modelSlots }, "worker started");
   try {
-    await runWorker(workerLoopOptions(config, sql, stop.signal));
+    await runWorker(workerLoopOptions(config, sql, stop.signal, services, slots));
   } finally {
     await sql.end({ timeout: 5 });
   }

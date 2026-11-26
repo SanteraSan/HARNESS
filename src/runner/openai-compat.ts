@@ -1,9 +1,13 @@
 import {
+  filterToolNames,
   interpretModelOutput,
+  isDeniedToolName,
   type ClaimedRun,
   type FinishOutcome,
+  type ModelInput,
   type ModelMessage,
   type ModelOutput,
+  type ModelToolSpec,
   type NewRunStep,
   type Provider,
   type Runner,
@@ -18,6 +22,8 @@ import type { Sql } from "../db/client.js";
 import { redact } from "../model/redact.js";
 import { resolveModel } from "../routing/resolve.js";
 import { decideToolCall, modelToolsForAllowlist } from "../tools/index.js";
+import type { ServiceCatalog } from "../services/index.js";
+import { runModelTurn, type ModelTurnOptions } from "./model-turn.js";
 import { prepareToolResultForModel } from "./tool-result-text.js";
 
 /**
@@ -53,6 +59,8 @@ export interface OpenAICompatRunnerOptions {
   secrets: readonly string[];
   /** Пул процесса. Без него алиас остаётся полем агента: второго пула раннер не открывает. */
   sql?: Sql;
+  /** Нет манифеста — локальные инструменты остаются. */
+  services?: ServiceCatalog;
 }
 
 interface TokenTotals {
@@ -84,8 +92,11 @@ export class OpenAICompatRunner implements Runner {
   private readonly fileRoot: string;
   private readonly secrets: readonly string[];
   private readonly sql: Sql | undefined;
+  private readonly services: ServiceCatalog | undefined;
   /** Алиас текущего захвата. null — выбора нет, остаётся resolveModel. */
   private chatModelAlias: ChatModelAlias | null = null;
+  /** Слот хода модели. null — тесты без таблицы слотов, вызов идёт напрямую. */
+  private modelTurn: ModelTurnOptions | null = null;
 
   constructor(options: OpenAICompatRunnerOptions) {
     if (options.fileRoot.trim().length === 0) {
@@ -95,6 +106,7 @@ export class OpenAICompatRunner implements Runner {
     this.fileRoot = options.fileRoot;
     this.secrets = [...options.secrets];
     this.sql = options.sql;
+    this.services = options.services;
   }
 
   /**
@@ -105,12 +117,20 @@ export class OpenAICompatRunner implements Runner {
     this.chatModelAlias = alias;
   }
 
+  /**
+   * Воркер передаёт слоты процесса на время захвата.
+   * null снимает их, чтобы следующий запуск не унаследовал чужой сигнал.
+   */
+  assignModelTurn(turn: ModelTurnOptions | null): void {
+    this.modelTurn = turn;
+  }
+
   async run(claimed: ClaimedRun, ctx: RunnerContext): Promise<void> {
     const chatAlias = this.chatModelAlias;
     this.chatModelAlias = null;
     const agent = await this.requireAgent(claimed.agentId);
     const allowlist = [...agent.toolAllowlist];
-    const tools = modelToolsForAllowlist(allowlist, ctx.tools);
+    const tools = this.toolsForModel(allowlist, ctx.tools);
     const messages = initialMessages(agent.systemPrompt, claimed.payload.message);
     const totals: TokenTotals = { promptTokens: null, completionTokens: null };
     const toolContext: ToolContext = {
@@ -134,32 +154,54 @@ export class OpenAICompatRunner implements Runner {
 
       resolved = await this.resolveAlias(agent, claimed.tenantId, seenEffects, chatAlias);
       let cost = costFor(resolved.provider, null);
-      const requestStep = await this.writeStep(
-        ctx,
-        {
-          ...baseStep(claimed.id, "model_request"),
-          requestExcerpt: this.mask(`${resolved.modelAlias}\n${claimed.payload.message}`),
+      let requestStep: NewRunStep | undefined;
+      const turnResult = await runModelTurn({
+        turn: this.modelTurn,
+        runId: claimed.id,
+        workerId: ctx.workerId,
+        leaseSeconds: ctx.leaseSeconds,
+        heartbeatRun: (runId, workerId, leaseSeconds) =>
+          ctx.heartbeat(runId, workerId, leaseSeconds),
+        onSlotLost: async () => {
+          await this.finishSlotLost(ctx, claimed.id, resolved);
         },
-        cost,
-      );
-
-      logger.info({ run_id: claimed.id, model: resolved.modelAlias, attempt }, "model request");
-      const output = await ctx.model.complete({
-        model: resolved.modelAlias,
-        temperature: 0,
-        messages,
-        tools,
-        maxTokens: agent.maxCompletionTokens,
+        // Потеря лока отменяет LiteLLM и держит слот, пока вызов не остановился.
+        holdUntilCallStops: true,
+        call: async (signal) => {
+          requestStep = await this.writeStep(
+            ctx,
+            {
+              ...baseStep(claimed.id, "model_request"),
+              requestExcerpt: this.mask(`${resolved.modelAlias}\n${claimed.payload.message}`),
+            },
+            cost,
+          );
+          logger.info({ run_id: claimed.id, model: resolved.modelAlias, attempt }, "model request");
+          return ctx.model.complete(
+            modelInputFor(resolved, messages, tools, agent.maxCompletionTokens, signal),
+          );
+        },
+        afterHeld: async (output) => {
+          totals.promptTokens = addTokens(totals.promptTokens, output.promptTokens);
+          totals.completionTokens = addTokens(totals.completionTokens, output.completionTokens);
+          cost = costFor(resolved.provider, output);
+          if (requestStep !== undefined && requestStep.costUsd !== cost) {
+            requestStep.costUsd = cost;
+            await this.reviseModelRequestCost(ctx, claimed.id, cost);
+          }
+        },
       });
-      totals.promptTokens = addTokens(totals.promptTokens, output.promptTokens);
-      totals.completionTokens = addTokens(totals.completionTokens, output.completionTokens);
-      cost = costFor(resolved.provider, output);
-      if (requestStep.costUsd !== cost) {
-        requestStep.costUsd = cost;
-        await this.reviseModelRequestCost(ctx, claimed.id, cost);
+      if (!turnResult.ok) {
+        return;
       }
+      const output = turnResult.value;
 
       const interpreted = interpretModelOutput(output);
+      if (externalTurn(resolved) && interpreted.type !== "final" && interpreted.type !== "parse_error") {
+        // Внешний алиас инструменты не исполняет и второй вызов не делает.
+        await this.finishExternalToolCall(ctx, claimed.id, resolved, totals, cost);
+        return;
+      }
       if (interpreted.type === "final") {
         await this.finishFinal(ctx, claimed.id, resolved, totals, interpreted.text, cost);
         return;
@@ -178,9 +220,9 @@ export class OpenAICompatRunner implements Runner {
         return;
       }
 
-      await this.applyToolCalls(
+      const continued = await this.applyToolCalls(
         ctx,
-        claimed.id,
+        claimed,
         allowlist,
         toolContext,
         messages,
@@ -189,6 +231,9 @@ export class OpenAICompatRunner implements Runner {
         cost,
         seenEffects,
       );
+      if (!continued) {
+        return;
+      }
     }
 
     await commitOutcome(
@@ -253,6 +298,28 @@ export class OpenAICompatRunner implements Runner {
     );
   }
 
+  /**
+   * Ответ пришёл, когда слот уже не наш. Текст в succeeded не пишется.
+   * Лок запуска к этому моменту ещё проверяется finish: ноль строк — статус не меняется.
+   */
+  private async finishSlotLost(
+    ctx: RunnerContext,
+    runId: string,
+    resolved: ResolvedAlias,
+  ): Promise<void> {
+    await commitOutcome(
+      ctx,
+      runId,
+      outcomeFor(
+        resolved,
+        { promptTokens: null, completionTokens: null },
+        "failed",
+        null,
+        "slot_lost",
+      ),
+    );
+  }
+
   private async finishFinal(
     ctx: RunnerContext,
     runId: string,
@@ -295,9 +362,45 @@ export class OpenAICompatRunner implements Runner {
     await commitOutcome(ctx, runId, outcomeFor(resolved, totals, "failed", null, reason));
   }
 
-  private async applyToolCalls(
+  private async finishExternalToolCall(
     ctx: RunnerContext,
     runId: string,
+    resolved: ResolvedAlias,
+    totals: TokenTotals,
+    cost: number | null,
+  ): Promise<void> {
+    await this.writeStep(
+      ctx,
+      {
+        ...baseStep(runId, "policy_deny"),
+        responseExcerpt: "external tool call refused",
+        error: "external_tool_call",
+      },
+      cost,
+    );
+    await commitOutcome(
+      ctx,
+      runId,
+      outcomeFor(resolved, totals, "failed", null, "external_tool_call"),
+    );
+  }
+
+  private toolsForModel(allowlist: readonly string[], registry: readonly Tool[]): ModelToolSpec[] {
+    const remote = this.services?.modelTools(allowlist) ?? [];
+    if (remote.length === 0) {
+      return modelToolsForAllowlist(allowlist, registry);
+    }
+    const remoteNames = new Set(remote.map((tool) => tool.name));
+    const local = modelToolsForAllowlist(
+      allowlist.filter((name) => !remoteNames.has(name)),
+      registry,
+    );
+    return [...remote, ...local];
+  }
+
+  private async applyToolCalls(
+    ctx: RunnerContext,
+    claimed: ClaimedRun,
     allowlist: readonly string[],
     toolContext: ToolContext,
     messages: ModelMessage[],
@@ -305,8 +408,7 @@ export class OpenAICompatRunner implements Runner {
     calls: readonly ToolCall[],
     cost: number | null,
     seenEffects: ToolEffect[],
-  ): Promise<void> {
-    noteCalledEffects(calls, ctx.tools, seenEffects);
+  ): Promise<boolean> {
     messages.push({
       role: "assistant",
       content: content === null ? null : this.mask(content),
@@ -322,12 +424,32 @@ export class OpenAICompatRunner implements Runner {
       await this.writeStep(
         ctx,
         {
-          ...baseStep(runId, "tool_call"),
+          ...baseStep(claimed.id, "tool_call"),
           toolName: call.name,
-          requestExcerpt: this.mask(call.arguments),
+          requestExcerpt:
+            this.services?.has(call.name) === true ? call.name : this.mask(call.arguments),
         },
         cost,
       );
+
+      // Имя из манифеста, прошедшее allowlist и не запрещённое, исполняет клиент сервиса.
+      // Локальный реестр для такого имени не нужен. Запрет сильнее манифеста: HTTP нет.
+      // Ход coder-cloud сюда не доходит: внешний ход отсекается до applyToolCalls.
+      if (this.servicePermitted(call.name, allowlist)) {
+        const visible = await this.executeServiceTool(
+          ctx,
+          claimed,
+          call,
+          toolContext,
+          cost,
+          seenEffects,
+        );
+        if (visible === null) {
+          return false;
+        }
+        messages.push(toolMessage(call.id, visible));
+        continue;
+      }
 
       // I3: запрет сильнее allowlist. Имя вне списка тоже не доходит до execute.
       const decision = decideToolCall(call.name, allowlist, ctx.tools);
@@ -336,7 +458,7 @@ export class OpenAICompatRunner implements Runner {
         await this.writeStep(
           ctx,
           {
-            ...baseStep(runId, "policy_deny"),
+            ...baseStep(claimed.id, "policy_deny"),
             toolName: call.name,
             requestExcerpt: this.mask(call.arguments),
             responseExcerpt: denial,
@@ -348,40 +470,146 @@ export class OpenAICompatRunner implements Runner {
         continue;
       }
 
-      const visible = await this.executeAllowed(ctx, runId, decision.tool, call, toolContext, cost);
+      const visible = await this.executeAllowed(
+        ctx,
+        claimed,
+        decision.tool,
+        call,
+        toolContext,
+        cost,
+        seenEffects,
+      );
+      if (visible === null) {
+        return false;
+      }
       messages.push(toolMessage(call.id, visible));
     }
+    return true;
+  }
+
+  private servicePermitted(name: string, allowlist: readonly string[]): boolean {
+    const services = this.services;
+    if (services === undefined || !services.has(name) || isDeniedToolName(name)) {
+      return false;
+    }
+    return filterToolNames(allowlist).includes(name);
+  }
+
+  private serviceEffect(name: string, tools: readonly Tool[]): ToolEffect | undefined {
+    const listed = this.services?.effect?.(name);
+    if (listed !== undefined) {
+      return listed;
+    }
+    for (const tool of tools) {
+      if (tool.name === name) {
+        return tool.effect;
+      }
+    }
+    return undefined;
+  }
+
+  private async executeServiceTool(
+    ctx: RunnerContext,
+    claimed: ClaimedRun,
+    call: ToolCall,
+    toolContext: ToolContext,
+    cost: number | null,
+    seenEffects: ToolEffect[],
+  ): Promise<string | null> {
+    const services = this.services;
+    const parsed = parseArguments(call.arguments);
+    if (services === undefined || !parsed.ok) {
+      const visible = this.toolData("invalid arguments");
+      await this.appendToolResult(ctx, claimed.id, call, visible, visible, cost, null);
+      return visible;
+    }
+
+    // Эффект из манифеста, после allowlist. Отказ политики сюда не доходит.
+    const effect = this.serviceEffect(call.name, ctx.tools);
+    if (effect !== undefined) {
+      seenEffects.push(effect);
+    }
+    const outcome = await services.execute({
+      runId: claimed.id,
+      tenantId: claimed.tenantId,
+      agentId: toolContext.agentId,
+      workerId: ctx.workerId,
+      toolCallId: call.id,
+      name: call.name,
+      args: parsed.value,
+    });
+    if (outcome.lockLost) {
+      return null;
+    }
+    await this.appendToolResult(
+      ctx,
+      claimed.id,
+      call,
+      outcome.text,
+      outcome.error,
+      cost,
+      outcome.requestExcerpt,
+    );
+    return outcome.text;
   }
 
   private async executeAllowed(
     ctx: RunnerContext,
-    runId: string,
+    claimed: ClaimedRun,
     tool: Tool,
     call: ToolCall,
     toolContext: ToolContext,
     cost: number | null,
-  ): Promise<string> {
+    seenEffects: ToolEffect[],
+  ): Promise<string | null> {
     const parsed = parseArguments(call.arguments);
     if (!parsed.ok) {
       const visible = this.toolData("invalid arguments");
-      await this.appendToolResult(ctx, runId, call, visible, visible, cost);
+      await this.appendToolResult(ctx, claimed.id, call, visible, visible, cost, null);
       return visible;
+    }
+
+    // Эффект только после allowlist и старта execute. Отказ политики алиас не меняет.
+    seenEffects.push(tool.effect);
+    if (this.services?.has(call.name) === true) {
+      const outcome = await this.services.execute({
+        runId: claimed.id,
+        tenantId: claimed.tenantId,
+        agentId: toolContext.agentId,
+        workerId: ctx.workerId,
+        toolCallId: call.id,
+        name: call.name,
+        args: parsed.value,
+      });
+      if (outcome.lockLost) {
+        return null;
+      }
+      await this.appendToolResult(
+        ctx,
+        claimed.id,
+        call,
+        outcome.text,
+        outcome.error,
+        cost,
+        outcome.requestExcerpt,
+      );
+      return outcome.text;
     }
 
     try {
       const outcome = await tool.execute(parsed.value, toolContext);
       if (outcome.ok) {
         const visible = this.toolData(outcome.text);
-        await this.appendToolResult(ctx, runId, call, visible, null, cost);
+        await this.appendToolResult(ctx, claimed.id, call, visible, null, cost, null);
         return visible;
       }
       const visible = this.toolData(outcome.error);
-      await this.appendToolResult(ctx, runId, call, visible, visible, cost);
+      await this.appendToolResult(ctx, claimed.id, call, visible, visible, cost, null);
       return visible;
     } catch (error) {
-      logger.warn({ run_id: runId, err: error, tool: tool.name }, "tool failed");
+      logger.warn({ run_id: claimed.id, err: error, tool: tool.name }, "tool failed");
       const visible = this.toolData(exceptionText(error));
-      await this.appendToolResult(ctx, runId, call, visible, visible, cost);
+      await this.appendToolResult(ctx, claimed.id, call, visible, visible, cost, null);
       return visible;
     }
   }
@@ -402,13 +630,15 @@ export class OpenAICompatRunner implements Runner {
     visible: string,
     error: string | null,
     cost: number | null,
+    requestExcerpt: string | null,
   ): Promise<void> {
     await this.writeStep(
       ctx,
       {
         ...baseStep(runId, "tool_result"),
         toolName: call.name,
-        requestExcerpt: this.mask(call.arguments),
+        requestExcerpt:
+          requestExcerpt === null ? this.mask(call.arguments) : this.mask(requestExcerpt),
         responseExcerpt: visible,
         error,
       },
@@ -485,26 +715,94 @@ export class OpenAICompatRunner implements Runner {
   }
 }
 
-function noteCalledEffects(
-  calls: readonly ToolCall[],
-  tools: readonly Tool[],
-  seenEffects: ToolEffect[],
-): void {
-  for (const call of calls) {
-    const tool = findNamedTool(call.name, tools);
-    if (tool !== undefined) {
-      seenEffects.push(tool.effect);
-    }
-  }
+/** Алиас шлюза или provider external: инструментов нет и результаты чтения не уходят. */
+function externalTurn(resolved: ResolvedAlias): boolean {
+  return resolved.modelAlias === "coder-cloud" || resolved.provider === "external";
 }
 
-function findNamedTool(name: string, tools: readonly Tool[]): Tool | undefined {
-  for (const tool of tools) {
-    if (tool.name === name) {
-      return tool;
-    }
+/**
+ * Ход coder-cloud отвечает без инструментов.
+ * Фраза добавляется к копии системного промпта, строка агента и локальный ход не меняются.
+ */
+const CODER_CLOUD_NO_TOOLS_NOTE =
+  "В этом ходе инструментов нет. Ответь на вопрос сразу, не открывая файлы.";
+
+function modelInputFor(
+  resolved: ResolvedAlias,
+  messages: readonly ModelMessage[],
+  tools: readonly ModelToolSpec[],
+  maxTokens: number,
+  signal?: AbortSignal,
+): ModelInput {
+  const external = externalTurn(resolved);
+  const input: ModelInput = {
+    model: resolved.modelAlias,
+    temperature: 0,
+    messages: messagesForTurn(messages, resolved),
+    tools: external ? [] : tools,
+    maxTokens,
+  };
+  if (signal !== undefined) {
+    input.signal = signal;
   }
-  return undefined;
+  // Алиас agent поле не получает. none не снимаем: отказ шлюза не приводит к повторному вызову без него.
+  if (resolved.modelAlias === "coder-cloud") {
+    input.reasoningEffort = "none";
+  }
+  return input;
+}
+
+function messagesForTurn(
+  messages: readonly ModelMessage[],
+  resolved: ResolvedAlias,
+): readonly ModelMessage[] {
+  const visible = externalTurn(resolved) ? messagesForExternal(messages) : messages;
+  if (resolved.modelAlias !== "coder-cloud") {
+    return visible;
+  }
+  return visible.map((message) =>
+    message.role === "system"
+      ? {
+          role: "system",
+          content: appendCoderCloudNote(message.content),
+          toolCallId: null,
+          toolCalls: null,
+        }
+      : message,
+  );
+}
+
+function appendCoderCloudNote(content: string | null): string {
+  if (content !== null && content.includes(CODER_CLOUD_NO_TOOLS_NOTE)) {
+    return content;
+  }
+  if (content === null || content.length === 0) {
+    return CODER_CLOUD_NO_TOOLS_NOTE;
+  }
+  return `${content}\n${CODER_CLOUD_NO_TOOLS_NOTE}`;
+}
+
+/**
+ * Внешний ход получает системный промпт и реплики человека.
+ * Результаты инструментов и аргументы вызовов в запрос не входят.
+ */
+function messagesForExternal(messages: readonly ModelMessage[]): ModelMessage[] {
+  const kept: ModelMessage[] = [];
+  for (const message of messages) {
+    if (message.role === "tool") {
+      continue;
+    }
+    if (message.toolCalls !== null && message.toolCalls.length > 0) {
+      continue;
+    }
+    kept.push({
+      role: message.role,
+      content: message.content,
+      toolCallId: null,
+      toolCalls: null,
+    });
+  }
+  return kept;
 }
 
 /** Локальный ход всегда 0. У внешнего хода число берётся из ответа, иначе null. */

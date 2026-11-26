@@ -160,6 +160,9 @@ export function replyForBuffered(liveRunId: string): string {
 /** Буфер уже не пуст: новый текст встаёт в хвост и не обгоняет его. */
 export const BUFFER_BEHIND_TEXT = "Сообщение сохранено. Оно встанет в очередь следом.";
 
+/** Сверх потолка ожидающих сообщений на пару агент и чат строка не пишется. */
+export const BUFFER_FULL_TEXT = "Очередь сообщений заполнена. Дождитесь, пока текущий запуск закончится.";
+
 export interface RunSnapshot {
   id: string;
   status: RunStatus;

@@ -77,7 +77,7 @@ describe("SecretVault", () => {
     expect(ciphertext.length).toBe(Buffer.byteLength(PLAINTEXT, "utf8") + 16);
   });
 
-  it("должен отдать секрет по связи отдела", async () => {
+  it("должен не отдавать секрет по имени отдела из запроса", async () => {
     const vault = vaultFromEnv();
     const runId = await createRun("secrets-department");
     await vault.put({ tenantId: "local", name: SECRET_NAME, plaintext: PLAINTEXT });
@@ -94,10 +94,13 @@ describe("SecretVault", () => {
       return Promise.resolve("opened");
     });
 
-    expect(seen).toBe(PLAINTEXT);
-    expect(outcome.received).toBe(true);
-    expect(outcome.modelText).toBe("opened");
+    expect(seen).toBeNull();
+    expect(outcome.received).toBe(false);
+    expect(outcome.modelText).not.toContain(PLAINTEXT);
     expect(stepBlob(await stepsOf(runId))).not.toContain(PLAINTEXT);
+    const steps = await stepsOf(runId);
+    expect(steps[0]?.kind).toBe("policy_deny");
+    expect(steps[0]?.error).toBe("no_grant");
   });
 
   it("должен вернуть ту же связь и не создавать вторую запись", async () => {
